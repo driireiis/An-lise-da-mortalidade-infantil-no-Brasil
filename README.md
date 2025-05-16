@@ -3,7 +3,7 @@
 #  Análise da Mortalidade Infantil no Brasil
 
 ## Autores
-Danilo Menelgado e Adriana Gomes dos Reis
+Danilo Menelgado, Adriana Gomes dos Reis e Gabriel Aleixo
 
 ## Objetivo
 Estudo baseado em dados públicos para entender os fatores da mortalidade infantil no Brasil, com suporte à tomada de decisão.
