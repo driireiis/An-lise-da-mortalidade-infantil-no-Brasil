@@ -1,0 +1,620 @@
+import pandas as pd
+import sqlite3
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import os
+
+# Configurações
+plt.style.use('ggplot')
+graficos_dir = 'graficos_olap'
+if not os.path.exists(graficos_dir):
+    os.makedirs(graficos_dir)
+
+# Conectar ao banco de dados
+conn = sqlite3.connect('obitos_infantis_2023.db')
+
+# Função para carregar dados
+def carregar_dados():
+    # Carregar tabelas
+    df_masc_fem = pd.read_sql("SELECT * FROM obitos_masc_fem", conn)
+    df_capitais = pd.read_sql("SELECT * FROM obitos_capitais", conn)
+    
+    # Verificar se temos as novas tabelas
+    tabelas_existentes = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
+    
+    dados = {
+        'obitos_masc_fem': df_masc_fem,
+        'obitos_capitais': df_capitais
+    }
+    
+    if 'obitos_tempo_gestacao' in tabelas_existentes:
+        df_gestacao = pd.read_sql("SELECT * FROM obitos_tempo_gestacao", conn)
+        dados['obitos_tempo_gestacao'] = df_gestacao
+    
+    if 'obitos_por_estado' in tabelas_existentes:
+        df_estados = pd.read_sql("SELECT * FROM obitos_por_estado", conn)
+        dados['obitos_por_estado'] = df_estados
+    
+    if 'analise_gestacao_por_estado' in tabelas_existentes:
+        df_gestacao_estado = pd.read_sql("SELECT * FROM analise_gestacao_por_estado", conn)
+        dados['analise_gestacao_por_estado'] = df_gestacao_estado
+    
+    return dados
+
+# Função para filtrar totais de qualquer DataFrame
+def filtrar_totais(df, col_local='capital'):
+    """
+    Remove quaisquer linhas que representem totais ou valores agregados
+    """
+    # Lista de termos que podem indicar linhas de total
+    termos_total = ['total', 'soma', 'todas', 'todos', 'brasil']
+    
+    # Filtrar linhas
+    if col_local in df.columns:
+        # Cria uma máscara para identificar linhas de totais
+        mascara = ~df[col_local].str.lower().str.contains('|'.join(termos_total), na=False)
+        return df[mascara]
+    return df
+
+# Função para criar gráfico OLAP de análise por sexo e local
+def criar_grafico_olap_sexo_local(dados):
+    # Verificar quais conjuntos de dados estão disponíveis
+    df_capitais = dados.get('obitos_masc_fem')
+    df_estados = dados.get('obitos_por_estado')
+    
+    if df_capitais is not None:
+        # Filtrar totais
+        df_capitais = filtrar_totais(df_capitais, 'capital')
+        
+        # Criar DataFrame consolidado para análise
+        df_capitais_melted = df_capitais.melt(
+            id_vars=['capital', 'ano'], 
+            value_vars=['masculino', 'feminino'],
+            var_name='sexo', 
+            value_name='obitos'
+        )
+        
+        # Criar gráfico interativo com Plotly
+        fig = px.sunburst(
+            df_capitais_melted,
+            path=['sexo', 'capital'],
+            values='obitos',
+            color='obitos',
+            color_continuous_scale='RdBu',
+            title='Óbitos Infantis por Sexo e Capital (2023)',
+        )
+        
+        fig.update_layout(
+            width=900,
+            height=900,
+            margin=dict(t=50, l=0, r=0, b=0),
+        )
+        
+        fig.write_html(f"{graficos_dir}/olap_sexo_capital_sunburst.html")
+        print(f"Gráfico OLAP de sexo x capital salvo em {graficos_dir}/olap_sexo_capital_sunburst.html")
+    
+    if df_estados is not None:
+        # Filtrar totais
+        df_estados = filtrar_totais(df_estados, 'estado')
+        
+        # Criar DataFrame consolidado para análise
+        df_estados_melted = df_estados.melt(
+            id_vars=['estado', 'ano'], 
+            value_vars=['masculino', 'feminino'],
+            var_name='sexo', 
+            value_name='obitos'
+        )
+        
+        # Criar gráfico interativo com Plotly
+        fig = px.treemap(
+            df_estados_melted,
+            path=['sexo', 'estado'],
+            values='obitos',
+            color='obitos',
+            color_continuous_scale='Viridis',
+            title='Óbitos Infantis por Sexo e Estado (2023)'
+        )
+        
+        fig.write_html(f"{graficos_dir}/olap_sexo_estado_treemap.html")
+        print(f"Gráfico OLAP de sexo x estado salvo em {graficos_dir}/olap_sexo_estado_treemap.html")
+    
+    # Se temos ambos, criar gráfico de comparação
+    if df_capitais is not None and df_estados is not None:
+        # Somar óbitos por sexo (apenas para estados/capitais individuais, não totais)
+        obitos_masc_capitais = df_capitais['masculino'].sum()
+        obitos_fem_capitais = df_capitais['feminino'].sum()
+        obitos_masc_estados = df_estados['masculino'].sum()
+        obitos_fem_estados = df_estados['feminino'].sum()
+        
+        # Calcular proporções
+        total_capitais = obitos_masc_capitais + obitos_fem_capitais
+        total_estados = obitos_masc_estados + obitos_fem_estados
+        
+        prop_masc_capitais = obitos_masc_capitais / total_capitais * 100 if total_capitais > 0 else 0
+        prop_fem_capitais = obitos_fem_capitais / total_capitais * 100 if total_capitais > 0 else 0
+        prop_masc_estados = obitos_masc_estados / total_estados * 100 if total_estados > 0 else 0
+        prop_fem_estados = obitos_fem_estados / total_estados * 100 if total_estados > 0 else 0
+        
+        # Criar gráfico de barras
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            x=['Capitais', 'Estados'],
+            y=[prop_masc_capitais, prop_masc_estados],
+            name='Masculino',
+            marker_color='blue',
+            text=[f'{prop_masc_capitais:.1f}%', f'{prop_masc_estados:.1f}%'],
+            textposition='auto'
+        ))
+        
+        fig.add_trace(go.Bar(
+            x=['Capitais', 'Estados'],
+            y=[prop_fem_capitais, prop_fem_estados],
+            name='Feminino',
+            marker_color='red',
+            text=[f'{prop_fem_capitais:.1f}%', f'{prop_fem_estados:.1f}%'],
+            textposition='auto'
+        ))
+        
+        fig.update_layout(
+            title='Comparação da Proporção de Óbitos por Sexo: Capitais vs Estados (2023)',
+            xaxis_title='Região',
+            yaxis_title='Percentual (%)',
+            barmode='group',
+            width=800,
+            height=600
+        )
+        
+        fig.write_html(f"{graficos_dir}/olap_comparacao_sexo_capitais_estados.html")
+        print(f"Gráfico OLAP de comparação por sexo salvo em {graficos_dir}/olap_comparacao_sexo_capitais_estados.html")
+
+
+def criar_grafico_olap_investigacao(dados):
+    df_capitais = dados.get('obitos_capitais')
+    
+    if df_capitais is not None:
+        # Filtrar totais
+        df_capitais = filtrar_totais(df_capitais, 'capital')
+        
+        # Renomear colunas para facilitar a visualização
+        df_capitais_renamed = df_capitais.rename(columns={
+            'obito_investigado,_com_ficha_sintese_informada': 'Com ficha',
+            'obito_investigado,_sem_ficha_sintese_informada': 'Sem ficha',
+            'obito_nao_investigado': 'Não investigado'
+        })
+        
+        # Remover qualquer coluna com "total" no nome
+        colunas_para_remover = [col for col in df_capitais_renamed.columns if 'total' in col.lower()]
+        if colunas_para_remover:
+            df_capitais_renamed = df_capitais_renamed.drop(columns=colunas_para_remover)
+        
+        # Criar DataFrame consolidado para análise
+        df_investigacao_melted = df_capitais_renamed.melt(
+            id_vars=['capital', 'ano'], 
+            value_vars=['Com ficha', 'Sem ficha', 'Não investigado'],
+            var_name='tipo_investigacao', 
+            value_name='quantidade'
+        )
+        
+        # Filtrando apenas linhas com quantidade > 0
+        df_investigacao_melted = df_investigacao_melted[df_investigacao_melted['quantidade'] > 0]
+        
+        # Usar treemap com valores absolutos
+        fig = px.treemap(
+            df_investigacao_melted,
+            path=['tipo_investigacao', 'capital'],
+            values='quantidade',
+            color='quantidade',
+            color_continuous_scale='Blues',
+            title='Óbitos Infantis por Tipo de Investigação e Capital (2023)'
+        )
+        
+        fig.update_layout(
+            width=1000,
+            height=800,
+        )
+        
+        fig.write_html(f"{graficos_dir}/olap_investigacao_capital_treemap.html")
+        print(f"Gráfico OLAP de investigação por capital salvo em {graficos_dir}/olap_investigacao_capital_treemap.html")
+        
+        # Calcular soma para ordenação
+        df_capitais_renamed['soma_valores'] = df_capitais_renamed[['Com ficha', 'Sem ficha', 'Não investigado']].sum(axis=1)
+        top_capitais = df_capitais_renamed.sort_values('soma_valores', ascending=False).head(15)
+        
+        # Remover a coluna de soma temporária
+        top_capitais = top_capitais.drop(columns=['soma_valores'])
+        
+        # Selecionar apenas as colunas relevantes para o heatmap
+        heatmap_data = top_capitais[['capital', 'Com ficha', 'Sem ficha', 'Não investigado']].set_index('capital')
+        
+        # Criar mapa de calor com valores absolutos
+        fig = px.imshow(
+            heatmap_data,
+            labels=dict(x="Tipo de Investigação", y="Capital", color="Quantidade"),
+            x=['Com ficha', 'Sem ficha', 'Não investigado'],
+            y=heatmap_data.index,
+            color_continuous_scale="YlGnBu",
+            title="Distribuição dos Tipos de Investigação por Capital (Top 15)",
+            text_auto=True
+        )
+        
+        fig.update_layout(
+            width=800,
+            height=800,
+            xaxis={'side': 'top'}
+        )
+        
+        fig.write_html(f"{graficos_dir}/olap_investigacao_capital_heatmap.html")
+        print(f"Mapa de calor OLAP de investigação por capital salvo em {graficos_dir}/olap_investigacao_capital_heatmap.html")
+
+
+# Função para criar gráfico OLAP de tempo de gestação
+def criar_grafico_olap_gestacao(dados):
+    df_gestacao = dados.get('obitos_tempo_gestacao')
+    df_gestacao_estado = dados.get('analise_gestacao_por_estado')
+    
+    if df_gestacao is not None:
+        # Filtrar totais
+        df_gestacao = filtrar_totais(df_gestacao, 'local')
+        
+        # Remover qualquer coluna com "total" no nome
+        colunas_total = [col for col in df_gestacao.columns if 'total' in col.lower()]
+        if colunas_total:
+            df_gestacao = df_gestacao.drop(columns=colunas_total)
+        
+        # Identificar colunas de tempo de gestação (excluindo 'gestacao_ignorado')
+        colunas_gestacao = [col for col in df_gestacao.columns 
+                          if col.startswith('gestacao_') and 'ignorado' not in col.lower()]
+        
+        # Renomear colunas para facilitar a visualização
+        rename_dict = {
+            'gestacao_menos_22_sem': 'Menos de 22 semanas',
+            'gestacao_22_27_sem': '22 a 27 semanas',
+            'gestacao_28_31_sem': '28 a 31 semanas',
+            'gestacao_32_36_sem': '32 a 36 semanas',
+            'gestacao_37_41_sem': '37 a 41 semanas',
+            'gestacao_42_mais_sem': '42 semanas e mais'
+        }
+        
+        df_gestacao_renamed = df_gestacao.rename(columns=rename_dict)
+        
+        # Criar DataFrame consolidado para análise
+        colunas_renomeadas = [rename_dict.get(col, col) for col in colunas_gestacao]
+        df_gestacao_melted = df_gestacao_renamed.melt(
+            id_vars=['local', 'ano'], 
+            value_vars=colunas_renomeadas,
+            var_name='tempo_gestacao', 
+            value_name='quantidade'
+        )
+        
+        # Filtrar apenas quantidades positivas
+        df_gestacao_melted = df_gestacao_melted[df_gestacao_melted['quantidade'] > 0]
+        
+        # Criar gráfico interativo de pizza por tempo de gestação
+        df_total_por_gestacao = df_gestacao_melted.groupby('tempo_gestacao')['quantidade'].sum().reset_index()
+        
+        fig = px.pie(
+            df_total_por_gestacao,
+            values='quantidade',
+            names='tempo_gestacao',
+            title='Distribuição dos Óbitos Infantis por Tempo de Gestação (2023)',
+            color_discrete_sequence=px.colors.sequential.Plasma_r
+        )
+        
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        
+        fig.write_html(f"{graficos_dir}/olap_gestacao_pie.html")
+        print(f"Gráfico OLAP de distribuição por tempo de gestação salvo em {graficos_dir}/olap_gestacao_pie.html")
+        
+        # Calcular soma para ordenação
+        df_gestacao['soma_valores'] = df_gestacao[colunas_gestacao].sum(axis=1)
+        top_locais = df_gestacao.sort_values('soma_valores', ascending=False).head(10)['local'].tolist()
+        df_top_gestacao = df_gestacao_melted[df_gestacao_melted['local'].isin(top_locais)]
+        
+        # Ordenar por soma de valores
+        local_order = df_gestacao.sort_values('soma_valores', ascending=False)['local'].tolist()
+        df_top_gestacao['local'] = pd.Categorical(df_top_gestacao['local'], categories=local_order, ordered=True)
+        df_top_gestacao = df_top_gestacao.sort_values('local')
+        
+        # Criando um gráfico de barras empilhadas com valores absolutos
+        fig = px.bar(
+            df_top_gestacao,
+            x='local',
+            y='quantidade',
+            color='tempo_gestacao',
+            title='Distribuição dos Óbitos por Tempo de Gestação (Top 10 Locais)',
+            labels={'quantidade': 'Quantidade', 'local': 'Local', 'tempo_gestacao': 'Tempo de Gestação'},
+            color_discrete_sequence=px.colors.qualitative.Set2
+        )
+        
+        fig.update_layout(
+            xaxis={'categoryorder': 'total descending'},
+            width=1000,
+            height=600,
+            barmode='stack',
+            yaxis_title='Quantidade',
+            xaxis_title='Local',
+            legend_title='Tempo de Gestação'
+        )
+        
+        fig.write_html(f"{graficos_dir}/olap_gestacao_local_stack.html")
+        print(f"Gráfico OLAP de gestação por local salvo em {graficos_dir}/olap_gestacao_local_stack.html")
+    
+    # Se temos dados de gestação por estado
+    if df_gestacao_estado is not None:
+        # Filtrar totais e remover colunas de total
+        df_gestacao_estado = filtrar_totais(df_gestacao_estado, 'estado' if 'estado' in df_gestacao_estado.columns else 'local')
+        colunas_total = [col for col in df_gestacao_estado.columns if 'total' in col.lower()]
+        if colunas_total:
+            df_gestacao_estado = df_gestacao_estado.drop(columns=colunas_total)
+        
+        # Identificar colunas de gestação (não percentuais)
+        cols_gestacao = [col for col in df_gestacao_estado.columns 
+                       if col.startswith('gestacao_') and 'ignorado' not in col.lower()]
+        
+        # Identificar colunas percentuais se não houver colunas absolutas
+        if not cols_gestacao:
+            cols_gestacao = [col for col in df_gestacao_estado.columns 
+                          if col.startswith('perc_') and 'ignorado' not in col.lower()]
+        
+        if not cols_gestacao:  # Se ainda não houver colunas utilizáveis
+            print("Não foram encontradas colunas adequadas para gestação por estado")
+            return
+        
+        # Renomear para facilitar visualização
+        rename_cols = {
+            'gestacao_menos_22_sem': '< 22 sem',
+            'gestacao_22_27_sem': '22-27 sem',
+            'gestacao_28_31_sem': '28-31 sem',
+            'gestacao_32_36_sem': '32-36 sem',
+            'gestacao_37_41_sem': '37-41 sem',
+            'gestacao_42_mais_sem': '≥ 42 sem'
+        }
+        
+        # Adicionar versões percentuais
+        for col in list(rename_cols.keys()):
+            rename_cols[f'perc_{col}'] = rename_cols[col]
+        
+        df_gestacao_estado_renamed = df_gestacao_estado.rename(columns=rename_cols)
+        cols_renamed = [rename_cols.get(col, col) for col in cols_gestacao if col in rename_cols]
+        
+        # Calcular soma para ordenação
+        index_col = 'estado' if 'estado' in df_gestacao_estado_renamed.columns else 'local'
+        if index_col in df_gestacao_estado_renamed.columns:
+            # Usar colunas disponíveis para ordenação
+            df_gestacao_estado_renamed['soma_valores'] = df_gestacao_estado_renamed[
+                [col for col in cols_gestacao if col in df_gestacao_estado_renamed.columns]
+            ].sum(axis=1, min_count=1)
+            
+            top_estados = df_gestacao_estado_renamed.sort_values('soma_valores', ascending=False).head(15)
+            top_estados = top_estados.drop(columns=['soma_valores'])
+            
+            # Selecionar colunas para o mapa de calor
+            heatmap_cols = [col for col in cols_renamed if col in top_estados.columns]
+            
+            if heatmap_cols:
+                fig = px.imshow(
+                    top_estados.set_index(index_col)[heatmap_cols],
+                    labels=dict(x="Tempo de Gestação", y=index_col.capitalize(), color="Quantidade"),
+                    x=heatmap_cols,
+                    y=top_estados[index_col],
+                    color_continuous_scale="Viridis",
+                    title=f"Distribuição dos Óbitos por Tempo de Gestação e {index_col.capitalize()} (Top 15)",
+                    text_auto=True
+                )
+                
+                fig.update_layout(
+                    width=900,
+                    height=800,
+                    xaxis={'side': 'top'}
+                )
+                
+                fig.write_html(f"{graficos_dir}/olap_gestacao_estado_heatmap.html")
+                print(f"Mapa de calor OLAP de gestação por estado salvo em {graficos_dir}/olap_gestacao_estado_heatmap.html")
+
+# Função para criar dashboard OLAP combinado
+def criar_dashboard_olap(dados):
+    # Criar um único dashboard que permita visualizar todas as dimensões
+    df_masc_fem = dados.get('obitos_masc_fem')
+    df_capitais = dados.get('obitos_capitais')
+    df_gestacao = dados.get('obitos_tempo_gestacao')
+    df_estados = dados.get('obitos_por_estado')
+    
+    # Verificar quais dados estão disponíveis
+    if df_masc_fem is None or df_capitais is None:
+        print("Dados básicos insuficientes para criar o dashboard OLAP")
+        return
+    
+    # Filtrar totais
+    df_masc_fem = filtrar_totais(df_masc_fem, 'capital')
+    df_capitais = filtrar_totais(df_capitais, 'capital')
+    if df_gestacao is not None:
+        df_gestacao = filtrar_totais(df_gestacao, 'local')
+    if df_estados is not None:
+        df_estados = filtrar_totais(df_estados, 'estado')
+    
+    # Remover colunas de total
+    for df in [df_masc_fem, df_capitais, df_gestacao, df_estados]:
+        if df is not None:
+            colunas_total = [col for col in df.columns if 'total' in col.lower()]
+            if colunas_total:
+                df = df.drop(columns=colunas_total)
+    
+    # Criar uma figura com subplots para o dashboard
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            "Óbitos por Sexo (Top 10 Capitais)",
+            "Distribuição da Investigação de Óbitos",
+            "Óbitos por Tempo de Gestação (se disponível)",
+            "Óbitos por Estado (Top 10)"
+        ),
+        specs=[
+            [{"type": "bar"}, {"type": "pie"}],
+            [{"type": "bar"}, {"type": "bar"}]
+        ]
+    )
+    
+    # 1. Gráfico de óbitos por sexo (top 10 capitais)
+    df_masc_fem.loc[:, 'soma_sexo'] = df_masc_fem['masculino'] + df_masc_fem['feminino']
+    top_capitais = df_masc_fem.sort_values('soma_sexo', ascending=False).head(10)
+    
+    fig.add_trace(
+        go.Bar(
+            x=top_capitais['capital'],
+            y=top_capitais['masculino'],
+            name='Masculino',
+            marker_color='blue'
+        ),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Bar(
+            x=top_capitais['capital'],
+            y=top_capitais['feminino'],
+            name='Feminino',
+            marker_color='red'
+        ),
+        row=1, col=1
+    )
+    
+    # 2. Gráfico de distribuição da investigação de óbitos
+    # Renomear colunas para melhor apresentação
+    df_capitais_renamed = df_capitais.rename(columns={
+        'obito_investigado,_com_ficha_sintese_informada': 'Com ficha',
+        'obito_investigado,_sem_ficha_sintese_informada': 'Sem ficha',
+        'obito_nao_investigado': 'Não investigado'
+    })
+    
+    # Calcular totais por tipo de investigação (somando valores individuais, não usando coluna 'total')
+    total_investigados_com_ficha = df_capitais_renamed['Com ficha'].sum()
+    total_investigados_sem_ficha = df_capitais_renamed['Sem ficha'].sum()
+    total_nao_investigados = df_capitais_renamed['Não investigado'].sum()
+    
+    # Verificar se há algum valor para mostrar
+    if total_investigados_com_ficha + total_investigados_sem_ficha + total_nao_investigados > 0:
+        # Adicionar gráfico de pizza
+        fig.add_trace(
+            go.Pie(
+                labels=['Com ficha', 'Sem ficha', 'Não investigado'],
+                values=[total_investigados_com_ficha, total_investigados_sem_ficha, total_nao_investigados],
+                marker_colors=['#2ca02c', '#d62728', '#9467bd']
+            ),
+            row=1, col=2
+        )
+    else:
+        # Caso não haja dados, adicionar um texto informativo
+        fig.add_trace(
+            go.Scatter(
+                x=[0],
+                y=[0],
+                text=["Não há dados de investigação disponíveis"],
+                mode="text",
+            ),
+            row=1, col=2
+        )
+    
+    # 3. Gráfico de óbitos por tempo de gestação (se disponível)
+    if df_gestacao is not None:
+        # Identificar colunas de tempo de gestação
+        colunas_gestacao = [col for col in df_gestacao.columns 
+                           if col.startswith('gestacao_') and 'ignorado' not in col.lower()]
+        
+        # Calcular totais por tempo de gestação
+        totais_gestacao = {col: df_gestacao[col].sum() for col in colunas_gestacao}
+        
+        # Renomear para melhor visualização
+        nome_legivel = {
+            'gestacao_menos_22_sem': 'Menos de 22',
+            'gestacao_22_27_sem': '22 a 27',
+            'gestacao_28_31_sem': '28 a 31',
+            'gestacao_32_36_sem': '32 a 36',
+            'gestacao_37_41_sem': '37 a 41',
+            'gestacao_42_mais_sem': '42+'
+        }
+        
+        fig.add_trace(
+            go.Bar(
+                x=[nome_legivel.get(col, col) for col in colunas_gestacao],
+                y=[totais_gestacao[col] for col in colunas_gestacao],
+                marker_color='#1f77b4'
+            ),
+            row=2, col=1
+        )
+    
+    # 4. Gráfico de óbitos por estados (se disponível) - mostrando separadamente por sexo
+    if df_estados is not None:
+        df_estados['soma_sexo'] = df_estados['masculino'] + df_estados['feminino']
+        # Selecionar top 10 estados por soma
+        top_estados = df_estados.sort_values('soma_sexo', ascending=False).head(10)
+        
+        # Trace para masculino
+        fig.add_trace(
+            go.Bar(
+                x=top_estados['estado'],
+                y=top_estados['masculino'],
+                name='Masculino (Estados)',
+                marker_color='rgba(0, 0, 255, 0.7)'
+            ),
+            row=2, col=2
+        )
+        
+        # Trace para feminino
+        fig.add_trace(
+            go.Bar(
+                x=top_estados['estado'],
+                y=top_estados['feminino'],
+                name='Feminino (Estados)',
+                marker_color='rgba(255, 0, 0, 0.7)'
+            ),
+            row=2, col=2
+        )
+    
+    # Layout do dashboard
+    fig.update_layout(
+        title_text="Dashboard OLAP - Análise de Óbitos Infantis (2023)",
+        width=1200,
+        height=1000,
+        showlegend=True
+    )
+    
+    # Ajustar layout dos subplots
+    fig.update_xaxes(tickangle=45, row=1, col=1)
+    fig.update_xaxes(tickangle=45, row=2, col=2)
+    
+    # Atualizar modo de barras para comparação (lado a lado)
+    fig.update_layout(barmode='group')
+    
+    fig.write_html(f"{graficos_dir}/dashboard_olap_completo.html")
+    print(f"Dashboard OLAP completo salvo em {graficos_dir}/dashboard_olap_completo.html")
+
+# Função principal
+def main():
+    print("Iniciando geração de gráficos OLAP para análise de óbitos infantis...")
+    
+    # Carregar dados
+    dados = carregar_dados()
+    
+    # Verificar quais tabelas foram carregadas
+    print("\nTabelas disponíveis para análise:")
+    for tabela, df in dados.items():
+        if df is not None:
+            print(f"- {tabela}: {len(df)} registros")
+    
+    # Criar gráficos OLAP
+    criar_grafico_olap_sexo_local(dados)
+    criar_grafico_olap_investigacao(dados)
+    criar_grafico_olap_gestacao(dados)
+    criar_dashboard_olap(dados)
+    
+    print("\nGeração de gráficos OLAP concluída. Todos os arquivos foram salvos no diretório:", graficos_dir)
+    print("Para visualizar os gráficos interativos, abra os arquivos HTML em um navegador.")
+
+if __name__ == "__main__":
+    main()
+    conn.close()
