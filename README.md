@@ -116,6 +116,7 @@ Acesse no navegador o endereço informado no terminal (geralmente http://127.0.0
 
 Possíveis Expansões
 Inclusão de outras dimensões, como causas de morte e faixa etária detalhada.
+```
 
 Análises temporais e comparações históricas.
 
