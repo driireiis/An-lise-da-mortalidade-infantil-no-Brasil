@@ -5,9 +5,6 @@
 Sistema OLAP para análise multidimensional de dados de mortalidade infantil
 Base de dados: mortalidade_infantil.db (gerada pelo script de download)
 
-Funcionalidades principais:
-- Criação de cubo de dados OLAP com múltiplas dimensões
-- Exportação de resultados para visualização
 """
 
 import pandas as pd
@@ -1134,38 +1131,31 @@ def main():
         print("\n3. PRINCIPAIS CAUSAS")
         causas = cubo.analise_causas()
         print(causas.head(10))
+
         
-        print("\n4. ANÁLISE POR SEXO E FAIXA ETÁRIA")
-        sexo_idade = cubo.comparativo_sexo_idade()
-        print(sexo_idade)
-        
-        print("\n5. ANÁLISE POR LOCAL DE ÓBITO")
+        print("\n4. ANÁLISE POR LOCAL DE ÓBITO")
         local = cubo.analise_local_obito()
         print(local)
         
         # Exemplo de operação SLICE
-        print("\n6. OPERAÇÃO SLICE - Óbitos em Hospital")
+        print("\n5. OPERAÇÃO SLICE - Óbitos em Hospital")
         slice_hospital = cubo.slice('local_descricao', 'Hospital')
         resumo_slice = cubo.roll_up(slice_hospital, ['ano'])
         print(resumo_slice)
 
         
         # Exemplo de operação DRILL-DOWN
-        print("\n7. OPERAÇÃO DRILL-DOWN - De UF para Causa")
+        print("\n6. OPERAÇÃO DRILL-DOWN - De UF para Causa")
         drill_down = cubo.drill_down(cubo.dados, 'uf', 'grupo_causa_cid', 'SP')
         print(drill_down.head(10))
 
         
         # Gerar insights
-        print("\n8. INSIGHTS AUTOMÁTICOS")
+        print("\n7. INSIGHTS AUTOMÁTICOS")
         insights = cubo.extrair_insights()
         for i, insight in enumerate(insights, 1):
             print(f"{i}. {insight}")
-        
-        # Gerar relatório
-        print("\n10. RELATÓRIO DINÂMICO")
-        relatorio = RelatorioDinamico(cubo)
-        relatorio.exportar_relatorio()
+
         
         print("\nAnálise concluída com sucesso!")
         
