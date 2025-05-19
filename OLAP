@@ -1,620 +1,1179 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Sistema OLAP para análise multidimensional de dados de mortalidade infantil
+Base de dados: mortalidade_infantil.db (gerada pelo script de download)
+
+Funcionalidades principais:
+- Criação de cubo de dados OLAP com múltiplas dimensões
+- Exportação de resultados para visualização
+"""
+
 import pandas as pd
-import sqlite3
+import numpy as np
+import sqlalchemy as sa
 import matplotlib.pyplot as plt
 import seaborn as sns
-import numpy as np
+from ipywidgets import interact, widgets
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import os
+import dash
+from dash import dcc, html, dash_table
+from dash.dependencies import Input, Output
+import warnings
 
-# Configurações
-plt.style.use('ggplot')
-graficos_dir = 'graficos_olap'
-if not os.path.exists(graficos_dir):
-    os.makedirs(graficos_dir)
+warnings.filterwarnings('ignore')
+sns.set_style('whitegrid')
 
-# Conectar ao banco de dados
-conn = sqlite3.connect('obitos_infantis_2023.db')
+# Configuração do banco de dados
+DATABASE_URI = "sqlite:///mortalidade_infantil.db"
 
-# Função para carregar dados
-def carregar_dados():
-    # Carregar tabelas
-    df_masc_fem = pd.read_sql("SELECT * FROM obitos_masc_fem", conn)
-    df_capitais = pd.read_sql("SELECT * FROM obitos_capitais", conn)
-    
-    # Verificar se temos as novas tabelas
-    tabelas_existentes = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
-    
-    dados = {
-        'obitos_masc_fem': df_masc_fem,
-        'obitos_capitais': df_capitais
-    }
-    
-    if 'obitos_tempo_gestacao' in tabelas_existentes:
-        df_gestacao = pd.read_sql("SELECT * FROM obitos_tempo_gestacao", conn)
-        dados['obitos_tempo_gestacao'] = df_gestacao
-    
-    if 'obitos_por_estado' in tabelas_existentes:
-        df_estados = pd.read_sql("SELECT * FROM obitos_por_estado", conn)
-        dados['obitos_por_estado'] = df_estados
-    
-    if 'analise_gestacao_por_estado' in tabelas_existentes:
-        df_gestacao_estado = pd.read_sql("SELECT * FROM analise_gestacao_por_estado", conn)
-        dados['analise_gestacao_por_estado'] = df_gestacao_estado
-    
-    return dados
-
-# Função para filtrar totais de qualquer DataFrame
-def filtrar_totais(df, col_local='capital'):
+class CuboOLAP:
     """
-    Remove quaisquer linhas que representem totais ou valores agregados
+    Implementação de um cubo OLAP para análise multidimensional
+    de dados de mortalidade infantil
     """
-    # Lista de termos que podem indicar linhas de total
-    termos_total = ['total', 'soma', 'todas', 'todos', 'brasil']
     
-    # Filtrar linhas
-    if col_local in df.columns:
-        # Cria uma máscara para identificar linhas de totais
-        mascara = ~df[col_local].str.lower().str.contains('|'.join(termos_total), na=False)
-        return df[mascara]
-    return df
-
-# Função para criar gráfico OLAP de análise por sexo e local
-def criar_grafico_olap_sexo_local(dados):
-    # Verificar quais conjuntos de dados estão disponíveis
-    df_capitais = dados.get('obitos_masc_fem')
-    df_estados = dados.get('obitos_por_estado')
+    def __init__(self):
+        """Inicializa a conexão com o banco e carrega os dados"""
+        self.engine = sa.create_engine(DATABASE_URI)
+        self.carregar_dados()
+        self.preparar_dimensoes()
+        
+    def carregar_dados(self):
+        """Carrega os dados do banco para memória"""
+        try:
+            query = """
+            SELECT 
+                m.id, m.ano, m.uf, m.municipio, m.data_obito, 
+                m.sexo, m.idade, m.idade_unidade, m.local_obito, 
+                m.causa_basica, m.grupo_causa,
+                CASE 
+                    WHEN m.local_obito = '1' THEN 'Hospital'
+                    WHEN m.local_obito = '2' THEN 'Outros estabelecimentos de saúde'
+                    WHEN m.local_obito = '3' THEN 'Domicílio'
+                    WHEN m.local_obito = '4' THEN 'Via pública'
+                    WHEN m.local_obito = '5' THEN 'Outros'
+                    ELSE 'Ignorado'
+                END as local_descricao,
+                CASE 
+                    WHEN m.sexo = 'M' THEN 'Masculino'
+                    WHEN m.sexo = 'F' THEN 'Feminino'
+                    ELSE 'Ignorado'
+                END as sexo_descricao,
+                CASE
+                    WHEN m.idade_unidade = '0' THEN 'Horas'
+                    WHEN m.idade_unidade = '1' THEN 'Dias'
+                    WHEN m.idade_unidade = '2' THEN 'Meses'
+                    WHEN m.idade_unidade = '3' THEN 'Anos'
+                    ELSE 'Ignorado'
+                END as idade_unidade_descricao,
+                CASE
+                    WHEN m.idade_unidade = '0' THEN m.idade / 24  -- Horas para dias
+                    WHEN m.idade_unidade = '1' THEN m.idade  -- Já está em dias
+                    WHEN m.idade_unidade = '2' THEN m.idade * 30  -- Meses para dias (aproximado)
+                    WHEN m.idade_unidade = '3' THEN m.idade * 365  -- Anos para dias (aproximado)
+                    ELSE NULL
+                END as idade_em_dias,
+                STRFTIME('%m', m.data_obito) as mes_obito,
+                STRFTIME('%d', m.data_obito) as dia_obito
+            FROM mortalidade_infantil m
+            """
+            self.dados = pd.read_sql(query, self.engine)
+            
+            # Tratar valores nulos/ausentes
+            self.dados['sexo'] = self.dados['sexo'].fillna('I')
+            self.dados['local_obito'] = self.dados['local_obito'].fillna('9')
+            self.dados['sexo_descricao'] = self.dados['sexo_descricao'].fillna('Ignorado')
+            self.dados['local_descricao'] = self.dados['local_descricao'].fillna('Ignorado')
+            
+            # Converter data_obito para datetime
+            self.dados['data_obito'] = pd.to_datetime(self.dados['data_obito'], errors='coerce')
+            
+            # Extrair mês e trimestre como dimensões comuns em OLAP
+            self.dados['mes'] = self.dados['data_obito'].dt.month
+            self.dados['mes_nome'] = self.dados['data_obito'].dt.strftime('%B')
+            self.dados['trimestre'] = self.dados['data_obito'].dt.quarter
+            
+            print(f"Dados carregados com sucesso. Total de registros: {len(self.dados)}")
+            
+        except Exception as e:
+            print(f"Erro ao carregar dados: {str(e)}")
+            self.dados = pd.DataFrame()  # DataFrame vazio em caso de erro
     
-    if df_capitais is not None:
-        # Filtrar totais
-        df_capitais = filtrar_totais(df_capitais, 'capital')
-        
-        # Criar DataFrame consolidado para análise
-        df_capitais_melted = df_capitais.melt(
-            id_vars=['capital', 'ano'], 
-            value_vars=['masculino', 'feminino'],
-            var_name='sexo', 
-            value_name='obitos'
-        )
-        
-        # Criar gráfico interativo com Plotly
-        fig = px.sunburst(
-            df_capitais_melted,
-            path=['sexo', 'capital'],
-            values='obitos',
-            color='obitos',
-            color_continuous_scale='RdBu',
-            title='Óbitos Infantis por Sexo e Capital (2023)',
-        )
-        
-        fig.update_layout(
-            width=900,
-            height=900,
-            margin=dict(t=50, l=0, r=0, b=0),
-        )
-        
-        fig.write_html(f"{graficos_dir}/olap_sexo_capital_sunburst.html")
-        print(f"Gráfico OLAP de sexo x capital salvo em {graficos_dir}/olap_sexo_capital_sunburst.html")
-    
-    if df_estados is not None:
-        # Filtrar totais
-        df_estados = filtrar_totais(df_estados, 'estado')
-        
-        # Criar DataFrame consolidado para análise
-        df_estados_melted = df_estados.melt(
-            id_vars=['estado', 'ano'], 
-            value_vars=['masculino', 'feminino'],
-            var_name='sexo', 
-            value_name='obitos'
-        )
-        
-        # Criar gráfico interativo com Plotly
-        fig = px.treemap(
-            df_estados_melted,
-            path=['sexo', 'estado'],
-            values='obitos',
-            color='obitos',
-            color_continuous_scale='Viridis',
-            title='Óbitos Infantis por Sexo e Estado (2023)'
-        )
-        
-        fig.write_html(f"{graficos_dir}/olap_sexo_estado_treemap.html")
-        print(f"Gráfico OLAP de sexo x estado salvo em {graficos_dir}/olap_sexo_estado_treemap.html")
-    
-    # Se temos ambos, criar gráfico de comparação
-    if df_capitais is not None and df_estados is not None:
-        # Somar óbitos por sexo (apenas para estados/capitais individuais, não totais)
-        obitos_masc_capitais = df_capitais['masculino'].sum()
-        obitos_fem_capitais = df_capitais['feminino'].sum()
-        obitos_masc_estados = df_estados['masculino'].sum()
-        obitos_fem_estados = df_estados['feminino'].sum()
-        
-        # Calcular proporções
-        total_capitais = obitos_masc_capitais + obitos_fem_capitais
-        total_estados = obitos_masc_estados + obitos_fem_estados
-        
-        prop_masc_capitais = obitos_masc_capitais / total_capitais * 100 if total_capitais > 0 else 0
-        prop_fem_capitais = obitos_fem_capitais / total_capitais * 100 if total_capitais > 0 else 0
-        prop_masc_estados = obitos_masc_estados / total_estados * 100 if total_estados > 0 else 0
-        prop_fem_estados = obitos_fem_estados / total_estados * 100 if total_estados > 0 else 0
-        
-        # Criar gráfico de barras
-        fig = go.Figure()
-        
-        fig.add_trace(go.Bar(
-            x=['Capitais', 'Estados'],
-            y=[prop_masc_capitais, prop_masc_estados],
-            name='Masculino',
-            marker_color='blue',
-            text=[f'{prop_masc_capitais:.1f}%', f'{prop_masc_estados:.1f}%'],
-            textposition='auto'
-        ))
-        
-        fig.add_trace(go.Bar(
-            x=['Capitais', 'Estados'],
-            y=[prop_fem_capitais, prop_fem_estados],
-            name='Feminino',
-            marker_color='red',
-            text=[f'{prop_fem_capitais:.1f}%', f'{prop_fem_estados:.1f}%'],
-            textposition='auto'
-        ))
-        
-        fig.update_layout(
-            title='Comparação da Proporção de Óbitos por Sexo: Capitais vs Estados (2023)',
-            xaxis_title='Região',
-            yaxis_title='Percentual (%)',
-            barmode='group',
-            width=800,
-            height=600
-        )
-        
-        fig.write_html(f"{graficos_dir}/olap_comparacao_sexo_capitais_estados.html")
-        print(f"Gráfico OLAP de comparação por sexo salvo em {graficos_dir}/olap_comparacao_sexo_capitais_estados.html")
-
-
-def criar_grafico_olap_investigacao(dados):
-    df_capitais = dados.get('obitos_capitais')
-    
-    if df_capitais is not None:
-        # Filtrar totais
-        df_capitais = filtrar_totais(df_capitais, 'capital')
-        
-        # Renomear colunas para facilitar a visualização
-        df_capitais_renamed = df_capitais.rename(columns={
-            'obito_investigado,_com_ficha_sintese_informada': 'Com ficha',
-            'obito_investigado,_sem_ficha_sintese_informada': 'Sem ficha',
-            'obito_nao_investigado': 'Não investigado'
-        })
-        
-        # Remover qualquer coluna com "total" no nome
-        colunas_para_remover = [col for col in df_capitais_renamed.columns if 'total' in col.lower()]
-        if colunas_para_remover:
-            df_capitais_renamed = df_capitais_renamed.drop(columns=colunas_para_remover)
-        
-        # Criar DataFrame consolidado para análise
-        df_investigacao_melted = df_capitais_renamed.melt(
-            id_vars=['capital', 'ano'], 
-            value_vars=['Com ficha', 'Sem ficha', 'Não investigado'],
-            var_name='tipo_investigacao', 
-            value_name='quantidade'
-        )
-        
-        # Filtrando apenas linhas com quantidade > 0
-        df_investigacao_melted = df_investigacao_melted[df_investigacao_melted['quantidade'] > 0]
-        
-        # Usar treemap com valores absolutos
-        fig = px.treemap(
-            df_investigacao_melted,
-            path=['tipo_investigacao', 'capital'],
-            values='quantidade',
-            color='quantidade',
-            color_continuous_scale='Blues',
-            title='Óbitos Infantis por Tipo de Investigação e Capital (2023)'
-        )
-        
-        fig.update_layout(
-            width=1000,
-            height=800,
-        )
-        
-        fig.write_html(f"{graficos_dir}/olap_investigacao_capital_treemap.html")
-        print(f"Gráfico OLAP de investigação por capital salvo em {graficos_dir}/olap_investigacao_capital_treemap.html")
-        
-        # Calcular soma para ordenação
-        df_capitais_renamed['soma_valores'] = df_capitais_renamed[['Com ficha', 'Sem ficha', 'Não investigado']].sum(axis=1)
-        top_capitais = df_capitais_renamed.sort_values('soma_valores', ascending=False).head(15)
-        
-        # Remover a coluna de soma temporária
-        top_capitais = top_capitais.drop(columns=['soma_valores'])
-        
-        # Selecionar apenas as colunas relevantes para o heatmap
-        heatmap_data = top_capitais[['capital', 'Com ficha', 'Sem ficha', 'Não investigado']].set_index('capital')
-        
-        # Criar mapa de calor com valores absolutos
-        fig = px.imshow(
-            heatmap_data,
-            labels=dict(x="Tipo de Investigação", y="Capital", color="Quantidade"),
-            x=['Com ficha', 'Sem ficha', 'Não investigado'],
-            y=heatmap_data.index,
-            color_continuous_scale="YlGnBu",
-            title="Distribuição dos Tipos de Investigação por Capital (Top 15)",
-            text_auto=True
-        )
-        
-        fig.update_layout(
-            width=800,
-            height=800,
-            xaxis={'side': 'top'}
-        )
-        
-        fig.write_html(f"{graficos_dir}/olap_investigacao_capital_heatmap.html")
-        print(f"Mapa de calor OLAP de investigação por capital salvo em {graficos_dir}/olap_investigacao_capital_heatmap.html")
-
-
-# Função para criar gráfico OLAP de tempo de gestação
-def criar_grafico_olap_gestacao(dados):
-    df_gestacao = dados.get('obitos_tempo_gestacao')
-    df_gestacao_estado = dados.get('analise_gestacao_por_estado')
-    
-    if df_gestacao is not None:
-        # Filtrar totais
-        df_gestacao = filtrar_totais(df_gestacao, 'local')
-        
-        # Remover qualquer coluna com "total" no nome
-        colunas_total = [col for col in df_gestacao.columns if 'total' in col.lower()]
-        if colunas_total:
-            df_gestacao = df_gestacao.drop(columns=colunas_total)
-        
-        # Identificar colunas de tempo de gestação (excluindo 'gestacao_ignorado')
-        colunas_gestacao = [col for col in df_gestacao.columns 
-                          if col.startswith('gestacao_') and 'ignorado' not in col.lower()]
-        
-        # Renomear colunas para facilitar a visualização
-        rename_dict = {
-            'gestacao_menos_22_sem': 'Menos de 22 semanas',
-            'gestacao_22_27_sem': '22 a 27 semanas',
-            'gestacao_28_31_sem': '28 a 31 semanas',
-            'gestacao_32_36_sem': '32 a 36 semanas',
-            'gestacao_37_41_sem': '37 a 41 semanas',
-            'gestacao_42_mais_sem': '42 semanas e mais'
-        }
-        
-        df_gestacao_renamed = df_gestacao.rename(columns=rename_dict)
-        
-        # Criar DataFrame consolidado para análise
-        colunas_renomeadas = [rename_dict.get(col, col) for col in colunas_gestacao]
-        df_gestacao_melted = df_gestacao_renamed.melt(
-            id_vars=['local', 'ano'], 
-            value_vars=colunas_renomeadas,
-            var_name='tempo_gestacao', 
-            value_name='quantidade'
-        )
-        
-        # Filtrar apenas quantidades positivas
-        df_gestacao_melted = df_gestacao_melted[df_gestacao_melted['quantidade'] > 0]
-        
-        # Criar gráfico interativo de pizza por tempo de gestação
-        df_total_por_gestacao = df_gestacao_melted.groupby('tempo_gestacao')['quantidade'].sum().reset_index()
-        
-        fig = px.pie(
-            df_total_por_gestacao,
-            values='quantidade',
-            names='tempo_gestacao',
-            title='Distribuição dos Óbitos Infantis por Tempo de Gestação (2023)',
-            color_discrete_sequence=px.colors.sequential.Plasma_r
-        )
-        
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        
-        fig.write_html(f"{graficos_dir}/olap_gestacao_pie.html")
-        print(f"Gráfico OLAP de distribuição por tempo de gestação salvo em {graficos_dir}/olap_gestacao_pie.html")
-        
-        # Calcular soma para ordenação
-        df_gestacao['soma_valores'] = df_gestacao[colunas_gestacao].sum(axis=1)
-        top_locais = df_gestacao.sort_values('soma_valores', ascending=False).head(10)['local'].tolist()
-        df_top_gestacao = df_gestacao_melted[df_gestacao_melted['local'].isin(top_locais)]
-        
-        # Ordenar por soma de valores
-        local_order = df_gestacao.sort_values('soma_valores', ascending=False)['local'].tolist()
-        df_top_gestacao['local'] = pd.Categorical(df_top_gestacao['local'], categories=local_order, ordered=True)
-        df_top_gestacao = df_top_gestacao.sort_values('local')
-        
-        # Criando um gráfico de barras empilhadas com valores absolutos
-        fig = px.bar(
-            df_top_gestacao,
-            x='local',
-            y='quantidade',
-            color='tempo_gestacao',
-            title='Distribuição dos Óbitos por Tempo de Gestação (Top 10 Locais)',
-            labels={'quantidade': 'Quantidade', 'local': 'Local', 'tempo_gestacao': 'Tempo de Gestação'},
-            color_discrete_sequence=px.colors.qualitative.Set2
-        )
-        
-        fig.update_layout(
-            xaxis={'categoryorder': 'total descending'},
-            width=1000,
-            height=600,
-            barmode='stack',
-            yaxis_title='Quantidade',
-            xaxis_title='Local',
-            legend_title='Tempo de Gestação'
-        )
-        
-        fig.write_html(f"{graficos_dir}/olap_gestacao_local_stack.html")
-        print(f"Gráfico OLAP de gestação por local salvo em {graficos_dir}/olap_gestacao_local_stack.html")
-    
-    # Se temos dados de gestação por estado
-    if df_gestacao_estado is not None:
-        # Filtrar totais e remover colunas de total
-        df_gestacao_estado = filtrar_totais(df_gestacao_estado, 'estado' if 'estado' in df_gestacao_estado.columns else 'local')
-        colunas_total = [col for col in df_gestacao_estado.columns if 'total' in col.lower()]
-        if colunas_total:
-            df_gestacao_estado = df_gestacao_estado.drop(columns=colunas_total)
-        
-        # Identificar colunas de gestação (não percentuais)
-        cols_gestacao = [col for col in df_gestacao_estado.columns 
-                       if col.startswith('gestacao_') and 'ignorado' not in col.lower()]
-        
-        # Identificar colunas percentuais se não houver colunas absolutas
-        if not cols_gestacao:
-            cols_gestacao = [col for col in df_gestacao_estado.columns 
-                          if col.startswith('perc_') and 'ignorado' not in col.lower()]
-        
-        if not cols_gestacao:  # Se ainda não houver colunas utilizáveis
-            print("Não foram encontradas colunas adequadas para gestação por estado")
+    def preparar_dimensoes(self):
+        """Prepara as dimensões para análise OLAP"""
+        if self.dados.empty:
+            print("Não há dados para preparar dimensões")
             return
         
-        # Renomear para facilitar visualização
-        rename_cols = {
-            'gestacao_menos_22_sem': '< 22 sem',
-            'gestacao_22_27_sem': '22-27 sem',
-            'gestacao_28_31_sem': '28-31 sem',
-            'gestacao_32_36_sem': '32-36 sem',
-            'gestacao_37_41_sem': '37-41 sem',
-            'gestacao_42_mais_sem': '≥ 42 sem'
+        # Dimensão Tempo
+        self.dim_tempo = self.dados[['ano', 'mes', 'mes_nome', 'trimestre']].drop_duplicates()
+        
+        # Dimensão Geografia (UF)
+        self.dim_geografia = self.dados[['uf']].drop_duplicates()
+        
+        # Dimensão Característica (sexo, idade)
+        self.dim_caracteristica = self.dados[['sexo', 'sexo_descricao', 
+                                            'idade_unidade', 'idade_unidade_descricao']].drop_duplicates()
+        
+        # Dimensão Local de Óbito
+        self.dim_local = self.dados[['local_obito', 'local_descricao']].drop_duplicates()
+        
+        # Mapeamento de causas básicas (CID-10)
+        # Carregando apenas alguns exemplos comuns em mortalidade infantil
+        self.causas_cid10 = {
+            'P07': 'Transtornos relacionados com gestação de curta duração e peso baixo ao nascer',
+            'P22': 'Desconforto respiratório do recém-nascido',
+            'P36': 'Septicemia bacteriana do recém-nascido',
+            'Q24': 'Outras malformações congênitas do coração',
+            'P00': 'Feto e recém-nascido afetados por afecções maternas',
+            'P01': 'Feto e recém-nascido afetados por complicações maternas da gravidez',
+            'J18': 'Pneumonia por microorganismo não especificado',
+            'A09': 'Diarréia e gastroenterite de origem infecciosa presumível',
+            'Q00': 'Anencefalia e malformações similares',
+            'Q89': 'Outras malformações congênitas',
         }
         
-        # Adicionar versões percentuais
-        for col in list(rename_cols.keys()):
-            rename_cols[f'perc_{col}'] = rename_cols[col]
+        # Agrupar causas básicas em categorias
+        def categorizar_causa(cid):
+            if pd.isna(cid) or len(cid) < 1:
+                return "Não informado"
+            
+            # Pegar o primeiro caractere para categorização geral
+            grupo = cid[0]
+            
+            grupos_cid = {
+                'A': 'Doenças infecciosas e parasitárias',
+                'B': 'Doenças infecciosas e parasitárias',
+                'C': 'Neoplasias',
+                'D': 'Neoplasias e doenças do sangue',
+                'E': 'Doenças endócrinas e metabólicas',
+                'G': 'Doenças do sistema nervoso',
+                'I': 'Doenças do aparelho circulatório',
+                'J': 'Doenças do aparelho respiratório',
+                'K': 'Doenças do aparelho digestivo',
+                'P': 'Afecções perinatais',
+                'Q': 'Malformações congênitas',
+                'R': 'Sintomas e sinais mal definidos',
+                'S': 'Lesões e causas externas',
+                'T': 'Lesões e causas externas',
+                'V': 'Causas externas',
+                'W': 'Causas externas',
+                'X': 'Causas externas',
+                'Y': 'Causas externas',
+            }
+            
+            return grupos_cid.get(grupo, "Outros")
         
-        df_gestacao_estado_renamed = df_gestacao_estado.rename(columns=rename_cols)
-        cols_renamed = [rename_cols.get(col, col) for col in cols_gestacao if col in rename_cols]
+        # Aplicar categorizações
+        self.dados['grupo_causa_cid'] = self.dados['causa_basica'].apply(categorizar_causa)
         
-        # Calcular soma para ordenação
-        index_col = 'estado' if 'estado' in df_gestacao_estado_renamed.columns else 'local'
-        if index_col in df_gestacao_estado_renamed.columns:
-            # Usar colunas disponíveis para ordenação
-            df_gestacao_estado_renamed['soma_valores'] = df_gestacao_estado_renamed[
-                [col for col in cols_gestacao if col in df_gestacao_estado_renamed.columns]
-            ].sum(axis=1, min_count=1)
+        # Criar dimensão de causas
+        self.dim_causas = self.dados[['causa_basica', 'grupo_causa_cid']].drop_duplicates()
+    
+    def slice(self, dimensao, valor):
+        """
+        Operação SLICE: Fixa uma dimensão e analisa as demais
+        Ex: Todos os óbitos do sexo masculino (fixando sexo='M')
+        """
+        if dimensao not in self.dados.columns:
+            raise ValueError(f"Dimensão {dimensao} não encontrada nos dados")
+        
+        filtro = self.dados[self.dados[dimensao] == valor]
+        
+        if filtro.empty:
+            print(f"Não foram encontrados dados para {dimensao}={valor}")
+            return pd.DataFrame()
+        
+        return filtro
+    
+    def dice(self, filtros):
+        """
+        Operação DICE: Aplica múltiplos filtros (como slice em várias dimensões)
+        Ex: Óbitos do sexo masculino em hospitais no ano de 2022
+        """
+        resultado = self.dados.copy()
+        
+        for dimensao, valor in filtros.items():
+            if dimensao not in resultado.columns:
+                raise ValueError(f"Dimensão {dimensao} não encontrada nos dados")
             
-            top_estados = df_gestacao_estado_renamed.sort_values('soma_valores', ascending=False).head(15)
-            top_estados = top_estados.drop(columns=['soma_valores'])
+            # Valor pode ser uma lista para filtro OR
+            if isinstance(valor, list):
+                resultado = resultado[resultado[dimensao].isin(valor)]
+            else:
+                resultado = resultado[resultado[dimensao] == valor]
+        
+        if resultado.empty:
+            print("Não foram encontrados dados para os filtros especificados")
+        
+        return resultado
+    
+    def roll_up(self, dados, dimensoes, metrica='count'):
+        """
+        Operação ROLL-UP: Agrega dados em um nível superior na hierarquia
+        Ex: De óbitos por município para óbitos por UF
+        """
+        if metrica == 'count':
+            return dados.groupby(dimensoes).size().reset_index(name='total_obitos')
+        else:
+            # Implementar outras métricas conforme necessário
+            return dados.groupby(dimensoes).agg({metrica: 'sum'}).reset_index()
+    
+    def drill_down(self, dados, dimensao_origem, dimensao_destino, filtro=None):
+        """
+        Operação DRILL-DOWN: Detalha dados em um nível inferior na hierarquia
+        Ex: De óbitos por UF para óbitos por município
+        """
+        if filtro:
+            dados_filtrados = dados[dados[dimensao_origem] == filtro]
+        else:
+            dados_filtrados = dados
+        
+        resultado = dados_filtrados.groupby([dimensao_origem, dimensao_destino]).size().reset_index(name='total_obitos')
+        return resultado
+    
+    def pivot(self, dados, linhas, colunas, valor='total_obitos'):
+        """
+        Cria uma tabela pivot para análise dimensional cruzada
+        """
+        if isinstance(linhas, str):
+            linhas = [linhas]
+        
+        if not dados.empty:
+            # Criar contagem se a coluna de valor não existir
+            if valor not in dados.columns:
+                temp = dados.groupby(linhas + [colunas]).size().reset_index(name='total_obitos')
+                return pd.pivot_table(temp, values='total_obitos', index=linhas, columns=colunas, fill_value=0)
+            else:
+                return pd.pivot_table(dados, values=valor, index=linhas, columns=colunas, fill_value=0)
+        return pd.DataFrame()
+    
+    def tendencia_temporal(self, dimensoes_grupo=None, filtros=None):
+        """
+        Análise de tendência temporal dos óbitos
+        """
+        dados = self.dados.copy()
+        
+        if filtros:
+            dados = self.dice(filtros)
+        
+        if dimensoes_grupo is None:
+            dimensoes_grupo = ['ano']
+        elif isinstance(dimensoes_grupo, str):
+            dimensoes_grupo = [dimensoes_grupo]
+        
+        # Sempre incluir dimensão temporal na análise
+        if 'ano' not in dimensoes_grupo and 'mes' not in dimensoes_grupo:
+            dimensoes_grupo = ['ano'] + dimensoes_grupo
+        
+        resultado = self.roll_up(dados, dimensoes_grupo)
+        return resultado
+    
+    def analise_geografica(self, nivel='uf', metrica='count'):
+        """
+        Análise geográfica dos óbitos por UF
+        """
+        return self.roll_up(self.dados, [nivel], metrica)
+    
+    def analise_causas(self, nivel_detalhe='grupo'):
+        """
+        Análise das principais causas de óbito
+        nivel_detalhe: 'grupo' para grupos de causas ou 'causa' para causas individuais
+        """
+        if nivel_detalhe == 'grupo':
+            return self.roll_up(self.dados, ['grupo_causa_cid'])
+        else:
+            return self.roll_up(self.dados, ['causa_basica'])
+    
+    def comparativo_sexo_idade(self):
+        """
+        Análise comparativa por sexo e faixa etária
+        """
+        # Criar faixas de idade em dias
+        def faixa_etaria(dias):
+            if pd.isna(dias):
+                return "Não informado"
+            if dias < 1:
+                return "Menos de 1 dia"
+            elif dias < 7:
+                return "1 a 6 dias"
+            elif dias < 28:
+                return "7 a 27 dias"
+            elif dias < 365:
+                return "28 a 364 dias"
+            else:
+                return "1 ano ou mais"
+        
+        dados_temp = self.dados.copy()
+        dados_temp['faixa_etaria'] = dados_temp['idade_em_dias'].apply(faixa_etaria)
+        
+        resultado = self.roll_up(dados_temp, ['sexo_descricao', 'faixa_etaria'])
+        return resultado
+    
+    def analise_local_obito(self, dimensoes_adicionais=None):
+        """
+        Análise por local de ocorrência do óbito
+        """
+        dimensoes = ['local_descricao']
+        
+        if dimensoes_adicionais:
+            if isinstance(dimensoes_adicionais, str):
+                dimensoes.append(dimensoes_adicionais)
+            else:
+                dimensoes.extend(dimensoes_adicionais)
+        
+        return self.roll_up(self.dados, dimensoes)
+    
+    def exportar_para_csv(self, dados, nome_arquivo):
+        """
+        Exporta os resultados para um arquivo CSV
+        """
+        dados.to_csv(nome_arquivo, index=False, encoding='utf-8-sig')
+        print(f"Dados exportados para {nome_arquivo}")
+    
+    def visualizar_tendencia(self, dimensoes_grupo=None, filtros=None, titulo="Tendência de Mortalidade Infantil"):
+        """
+        Cria um gráfico de tendência temporal
+        """
+        dados_tendencia = self.tendencia_temporal(dimensoes_grupo, filtros)
+        
+        if dados_tendencia.empty:
+            print("Não há dados suficientes para gerar o gráfico")
+            return
+        
+        plt.figure(figsize=(12, 6))
+        
+        if len(dimensoes_grupo) == 1 and dimensoes_grupo[0] == 'ano':
+            # Gráfico simples por ano
+            plt.bar(dados_tendencia['ano'], dados_tendencia['total_obitos'])
+            plt.xlabel('Ano')
+            plt.ylabel('Total de Óbitos')
+        else:
+            # Gráfico com múltiplas séries
+            pivot = dados_tendencia.pivot_table(
+                values='total_obitos',
+                index='ano',
+                columns=dimensoes_grupo[1] if len(dimensoes_grupo) > 1 else None,
+                fill_value=0
+            )
+            pivot.plot(kind='bar', figsize=(12, 6))
+            plt.xlabel('Ano')
+            plt.ylabel('Total de Óbitos')
+            plt.legend(title=dimensoes_grupo[1] if len(dimensoes_grupo) > 1 else '')
+        
+        plt.title(titulo)
+        plt.tight_layout()
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.show()
+    
+    def visualizar_distribuicao_geografica(self, ano=None):
+        """
+        Cria um gráfico da distribuição geográfica dos óbitos
+        """
+        dados = self.dados.copy()
+        
+        if ano:
+            dados = dados[dados['ano'] == ano]
+        
+        analise_uf = self.roll_up(dados, ['uf'])
+        
+        plt.figure(figsize=(14, 8))
+        sns.barplot(x='uf', y='total_obitos', data=analise_uf.sort_values('total_obitos', ascending=False))
+        plt.title(f'Mortalidade Infantil por UF {"- " + str(ano) if ano else ""}')
+        plt.xlabel('UF')
+        plt.ylabel('Total de Óbitos')
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.show()
+    
+    def visualizar_causas(self, tipo='grupo', n_top=10):
+        """
+        Cria um gráfico das principais causas de óbito
+        """
+        if tipo == 'grupo':
+            analise = self.analise_causas('grupo')
+            coluna_x = 'grupo_causa_cid'
+        else:
+            analise = self.analise_causas('causa')
+            coluna_x = 'causa_basica'
             
-            # Selecionar colunas para o mapa de calor
-            heatmap_cols = [col for col in cols_renamed if col in top_estados.columns]
+            # Adicionar descrição para as causas mais comuns
+            causas_conhecidas = pd.DataFrame(list(self.causas_cid10.items()), 
+                                            columns=['causa_basica', 'descricao'])
             
-            if heatmap_cols:
-                fig = px.imshow(
-                    top_estados.set_index(index_col)[heatmap_cols],
-                    labels=dict(x="Tempo de Gestação", y=index_col.capitalize(), color="Quantidade"),
-                    x=heatmap_cols,
-                    y=top_estados[index_col],
-                    color_continuous_scale="Viridis",
-                    title=f"Distribuição dos Óbitos por Tempo de Gestação e {index_col.capitalize()} (Top 15)",
-                    text_auto=True
-                )
-                
-                fig.update_layout(
-                    width=900,
-                    height=800,
-                    xaxis={'side': 'top'}
-                )
-                
-                fig.write_html(f"{graficos_dir}/olap_gestacao_estado_heatmap.html")
-                print(f"Mapa de calor OLAP de gestação por estado salvo em {graficos_dir}/olap_gestacao_estado_heatmap.html")
-
-# Função para criar dashboard OLAP combinado
-def criar_dashboard_olap(dados):
-    # Criar um único dashboard que permita visualizar todas as dimensões
-    df_masc_fem = dados.get('obitos_masc_fem')
-    df_capitais = dados.get('obitos_capitais')
-    df_gestacao = dados.get('obitos_tempo_gestacao')
-    df_estados = dados.get('obitos_por_estado')
+            analise = analise.merge(causas_conhecidas, on='causa_basica', how='left')
+            analise['descricao'] = analise['descricao'].fillna('Outros')
+            analise['causa_rotulo'] = analise['causa_basica'] + ' - ' + analise['descricao']
+            coluna_x = 'causa_rotulo'
+        
+        # Pegar as N principais causas
+        top_causas = analise.nlargest(n_top, 'total_obitos')
+        
+        plt.figure(figsize=(14, 8))
+        sns.barplot(x='total_obitos', y=coluna_x, data=top_causas.sort_values('total_obitos'))
+        plt.title(f'{"Grupos de " if tipo=="grupo" else ""}Causas de Mortalidade Infantil')
+        plt.xlabel('Total de Óbitos')
+        plt.ylabel('Causa')
+        plt.grid(axis='x', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.show()
     
-    # Verificar quais dados estão disponíveis
-    if df_masc_fem is None or df_capitais is None:
-        print("Dados básicos insuficientes para criar o dashboard OLAP")
-        return
-    
-    # Filtrar totais
-    df_masc_fem = filtrar_totais(df_masc_fem, 'capital')
-    df_capitais = filtrar_totais(df_capitais, 'capital')
-    if df_gestacao is not None:
-        df_gestacao = filtrar_totais(df_gestacao, 'local')
-    if df_estados is not None:
-        df_estados = filtrar_totais(df_estados, 'estado')
-    
-    # Remover colunas de total
-    for df in [df_masc_fem, df_capitais, df_gestacao, df_estados]:
-        if df is not None:
-            colunas_total = [col for col in df.columns if 'total' in col.lower()]
-            if colunas_total:
-                df = df.drop(columns=colunas_total)
-    
-    # Criar uma figura com subplots para o dashboard
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=(
-            "Óbitos por Sexo (Top 10 Capitais)",
-            "Distribuição da Investigação de Óbitos",
-            "Óbitos por Tempo de Gestação (se disponível)",
-            "Óbitos por Estado (Top 10)"
-        ),
-        specs=[
-            [{"type": "bar"}, {"type": "pie"}],
-            [{"type": "bar"}, {"type": "bar"}]
+    def visualizar_por_sexo_idade(self):
+        """
+        Cria um gráfico da distribuição por sexo e faixa etária
+        """
+        dados = self.comparativo_sexo_idade()
+        
+        pivot = dados.pivot_table(
+            values='total_obitos',
+            index='faixa_etaria',
+            columns='sexo_descricao',
+            fill_value=0
+        )
+        
+        # Ordenar as faixas etárias
+        ordem_faixas = [
+            "Menos de 1 dia", 
+            "1 a 6 dias", 
+            "7 a 27 dias", 
+            "28 a 364 dias", 
+            "1 ano ou mais", 
+            "Não informado"
         ]
-    )
-    
-    # 1. Gráfico de óbitos por sexo (top 10 capitais)
-    df_masc_fem.loc[:, 'soma_sexo'] = df_masc_fem['masculino'] + df_masc_fem['feminino']
-    top_capitais = df_masc_fem.sort_values('soma_sexo', ascending=False).head(10)
-    
-    fig.add_trace(
-        go.Bar(
-            x=top_capitais['capital'],
-            y=top_capitais['masculino'],
-            name='Masculino',
-            marker_color='blue'
-        ),
-        row=1, col=1
-    )
-    
-    fig.add_trace(
-        go.Bar(
-            x=top_capitais['capital'],
-            y=top_capitais['feminino'],
-            name='Feminino',
-            marker_color='red'
-        ),
-        row=1, col=1
-    )
-    
-    # 2. Gráfico de distribuição da investigação de óbitos
-    # Renomear colunas para melhor apresentação
-    df_capitais_renamed = df_capitais.rename(columns={
-        'obito_investigado,_com_ficha_sintese_informada': 'Com ficha',
-        'obito_investigado,_sem_ficha_sintese_informada': 'Sem ficha',
-        'obito_nao_investigado': 'Não investigado'
-    })
-    
-    # Calcular totais por tipo de investigação (somando valores individuais, não usando coluna 'total')
-    total_investigados_com_ficha = df_capitais_renamed['Com ficha'].sum()
-    total_investigados_sem_ficha = df_capitais_renamed['Sem ficha'].sum()
-    total_nao_investigados = df_capitais_renamed['Não investigado'].sum()
-    
-    # Verificar se há algum valor para mostrar
-    if total_investigados_com_ficha + total_investigados_sem_ficha + total_nao_investigados > 0:
-        # Adicionar gráfico de pizza
-        fig.add_trace(
-            go.Pie(
-                labels=['Com ficha', 'Sem ficha', 'Não investigado'],
-                values=[total_investigados_com_ficha, total_investigados_sem_ficha, total_nao_investigados],
-                marker_colors=['#2ca02c', '#d62728', '#9467bd']
-            ),
-            row=1, col=2
-        )
-    else:
-        # Caso não haja dados, adicionar um texto informativo
-        fig.add_trace(
-            go.Scatter(
-                x=[0],
-                y=[0],
-                text=["Não há dados de investigação disponíveis"],
-                mode="text",
-            ),
-            row=1, col=2
-        )
-    
-    # 3. Gráfico de óbitos por tempo de gestação (se disponível)
-    if df_gestacao is not None:
-        # Identificar colunas de tempo de gestação
-        colunas_gestacao = [col for col in df_gestacao.columns 
-                           if col.startswith('gestacao_') and 'ignorado' not in col.lower()]
         
-        # Calcular totais por tempo de gestação
-        totais_gestacao = {col: df_gestacao[col].sum() for col in colunas_gestacao}
+        # Filtrar apenas faixas que existem nos dados
+        ordem_existente = [f for f in ordem_faixas if f in pivot.index]
         
-        # Renomear para melhor visualização
-        nome_legivel = {
-            'gestacao_menos_22_sem': 'Menos de 22',
-            'gestacao_22_27_sem': '22 a 27',
-            'gestacao_28_31_sem': '28 a 31',
-            'gestacao_32_36_sem': '32 a 36',
-            'gestacao_37_41_sem': '37 a 41',
-            'gestacao_42_mais_sem': '42+'
-        }
+        pivot = pivot.reindex(ordem_existente)
         
-        fig.add_trace(
-            go.Bar(
-                x=[nome_legivel.get(col, col) for col in colunas_gestacao],
-                y=[totais_gestacao[col] for col in colunas_gestacao],
-                marker_color='#1f77b4'
-            ),
-            row=2, col=1
+        plt.figure(figsize=(12, 8))
+        ax = pivot.plot(kind='bar', figsize=(12, 8))
+        plt.title('Mortalidade Infantil por Sexo e Faixa Etária')
+        plt.xlabel('Faixa Etária')
+        plt.ylabel('Total de Óbitos')
+        plt.legend(title='Sexo')
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        
+        # Adicionar rótulos nos topos das barras
+        for container in ax.containers:
+            ax.bar_label(container, fmt='%d')
+            
+        plt.tight_layout()
+        plt.show()
+    
+    def criar_dashboard(self):
+        """
+        Cria um dashboard interativo com Dash para exploração dos dados
+        """
+        # Preparar dados para o dashboard
+        tendencia_por_ano = self.tendencia_temporal(['ano'])
+        tendencia_por_ano_sexo = self.tendencia_temporal(['ano', 'sexo_descricao'])
+        distribuicao_uf = self.analise_geografica()
+        causas = self.analise_causas('grupo')
+        local_obito = self.analise_local_obito()
+        
+        # Inicializar o aplicativo Dash
+        app = dash.Dash(__name__, title="Dashboard de Mortalidade Infantil")
+        
+        # Layout do dashboard
+        app.layout = html.Div([
+            html.H1("Dashboard de Análise de Mortalidade Infantil", 
+                    style={'textAlign': 'center', 'marginBottom': 30}),
+            
+            # Filtros
+            html.Div([
+                html.H3("Filtros", style={'marginBottom': 20}),
+                
+                html.Div([
+                    html.Label("Ano:"),
+                    dcc.Dropdown(
+                        id='filtro-ano',
+                        options=[{'label': str(ano), 'value': ano} 
+                                for ano in sorted(self.dados['ano'].unique())],
+                        value=None,
+                        placeholder="Todos os anos",
+                        multi=True
+                    ),
+                ], style={'width': '30%', 'display': 'inline-block', 'marginRight': '3%'}),
+                
+                html.Div([
+                    html.Label("UF:"),
+                    dcc.Dropdown(
+                        id='filtro-uf',
+                        options=[{'label': uf, 'value': uf} 
+                                for uf in sorted(self.dados['uf'].unique())],
+                        value=None,
+                        placeholder="Todas as UFs",
+                        multi=True
+                    ),
+                ], style={'width': '30%', 'display': 'inline-block', 'marginRight': '3%'}),
+                
+                html.Div([
+                    html.Label("Sexo:"),
+                    dcc.Dropdown(
+                        id='filtro-sexo',
+                        options=[
+                            {'label': 'Masculino', 'value': 'Masculino'},
+                            {'label': 'Feminino', 'value': 'Feminino'},
+                            {'label': 'Ignorado', 'value': 'Ignorado'}
+                        ],
+                        value=None,
+                        placeholder="Todos os sexos",
+                        multi=True
+                    ),
+                ], style={'width': '30%', 'display': 'inline-block'}),
+                
+            ], style={'padding': '20px', 'backgroundColor': '#f2f2f2', 'borderRadius': '10px', 'marginBottom': 30}),
+            
+            # Indicadores
+            html.Div([
+                html.Div([
+                    html.H4("Total de Óbitos", style={'textAlign': 'center'}),
+                    html.Div(id='indicador-total-obitos', 
+                             style={'fontSize': 40, 'textAlign': 'center', 'fontWeight': 'bold'})
+                ], style={'width': '30%', 'display': 'inline-block', 'backgroundColor': '#e6f2ff', 
+                          'borderRadius': '10px', 'padding': '20px', 'marginRight': '3%'}),
+                
+                html.Div([
+                    html.H4("Média Mensal", style={'textAlign': 'center'}),
+                    html.Div(id='indicador-media-mensal', 
+                             style={'fontSize': 40, 'textAlign': 'center', 'fontWeight': 'bold'})
+                ], style={'width': '30%', 'display': 'inline-block', 'backgroundColor': '#ffe6e6', 
+                          'borderRadius': '10px', 'padding': '20px', 'marginRight': '3%'}),
+                
+                html.Div([
+                    html.H4("Proporção por Sexo", style={'textAlign': 'center'}),
+                    html.Div(id='indicador-prop-sexo', 
+                             style={'fontSize': 20, 'textAlign': 'center'})
+                ], style={'width': '30%', 'display': 'inline-block', 'backgroundColor': '#e6ffe6', 
+                          'borderRadius': '10px', 'padding': '20px'}),
+            ], style={'marginBottom': 30}),
+            
+            # Gráficos - Linha 1
+            html.Div([
+                html.Div([
+                    dcc.Graph(id='grafico-tendencia')
+                ], style={'width': '48%', 'display': 'inline-block', 'marginRight': '4%'}),
+                
+                html.Div([
+                    dcc.Graph(id='grafico-distribuicao-uf')
+                ], style={'width': '48%', 'display': 'inline-block'}),
+            ], style={'marginBottom': 30}),
+            
+            # Gráficos - Linha 2
+            html.Div([
+                html.Div([
+                    dcc.Graph(id='grafico-causas')
+                ], style={'width': '48%', 'display': 'inline-block', 'marginRight': '4%'}),
+                
+                html.Div([
+                    dcc.Graph(id='grafico-local-obito')
+                ], style={'width': '48%', 'display': 'inline-block'}),
+            ], style={'marginBottom': 30}),
+            
+            # Tabela de dados
+            html.Div([
+                html.H3("Dados Detalhados", style={'marginBottom': 20}),
+                dash_table.DataTable(
+                    id='tabela-dados',
+                    columns=[
+                        {"name": "Ano", "id": "ano"},
+                        {"name": "UF", "id": "uf"},
+                        {"name": "Sexo", "id": "sexo_descricao"},
+                        {"name": "Local de Óbito", "id": "local_descricao"},
+                        {"name": "Grupo de Causa", "id": "grupo_causa_cid"},
+                        {"name": "Total", "id": "total_obitos"}
+                    ],
+                    page_size=10,
+                    style_table={'overflowX': 'auto'},
+                    style_cell={'textAlign': 'left', 'padding': '10px'},
+                    style_header={
+                        'backgroundColor': '#2c3e50',
+                        'fontWeight': 'bold',
+                        'color': 'white'
+                    },
+                    style_data_conditional=[
+                        {
+                            'if': {'row_index': 'odd'},
+                            'backgroundColor': '#f9f9f9'
+                        }
+                    ]
+                )
+            ], style={'padding': '20px', 'backgroundColor': '#f2f2f2', 'borderRadius': '10px'})
+        ], style={'padding': '20px', 'fontFamily': 'Arial'})
+        
+        # Callbacks para atualização dos componentes
+        @app.callback(
+            [Output('indicador-total-obitos', 'children'),
+             Output('indicador-media-mensal', 'children'),
+             Output('indicador-prop-sexo', 'children'),
+             Output('grafico-tendencia', 'figure'),
+             Output('grafico-distribuicao-uf', 'figure'),
+             Output('grafico-causas', 'figure'),
+             Output('grafico-local-obito', 'figure'),
+             Output('tabela-dados', 'data')],
+            [Input('filtro-ano', 'value'),
+             Input('filtro-uf', 'value'),
+             Input('filtro-sexo', 'value')]
         )
-    
-    # 4. Gráfico de óbitos por estados (se disponível) - mostrando separadamente por sexo
-    if df_estados is not None:
-        df_estados['soma_sexo'] = df_estados['masculino'] + df_estados['feminino']
-        # Selecionar top 10 estados por soma
-        top_estados = df_estados.sort_values('soma_sexo', ascending=False).head(10)
+        def atualizar_dashboard(anos, ufs, sexos):
+            # Aplicar filtros
+            dados_filtrados = self.dados.copy()
+            
+            if anos:
+                dados_filtrados = dados_filtrados[dados_filtrados['ano'].isin(anos)]
+            
+            if ufs:
+                dados_filtrados = dados_filtrados[dados_filtrados['uf'].isin(ufs)]
+            
+            if sexos:
+                dados_filtrados = dados_filtrados[dados_filtrados['sexo_descricao'].isin(sexos)]
+            
+            # Calcular indicadores
+            total_obitos = len(dados_filtrados)
+            
+            if total_obitos > 0:
+                # Média mensal - considerando meses com dados
+                meses_com_dados = dados_filtrados.groupby(['ano', 'mes']).size().reset_index()
+                n_meses = len(meses_com_dados)
+                media_mensal = round(total_obitos / max(1, n_meses), 1)
+                
+                # Proporção por sexo
+                por_sexo = dados_filtrados.groupby('sexo_descricao').size()
+                total_m = por_sexo.get('Masculino', 0)
+                total_f = por_sexo.get('Feminino', 0)
+                total_i = por_sexo.get('Ignorado', 0)
+                
+                prop_m = round(100 * total_m / total_obitos, 1) if total_obitos > 0 else 0
+                prop_f = round(100 * total_f / total_obitos, 1) if total_obitos > 0 else 0
+                prop_i = round(100 * total_i / total_obitos, 1) if total_obitos > 0 else 0
+                
+                texto_prop_sexo = [
+                    html.Div(f"Masculino: {prop_m}%"),
+                    html.Div(f"Feminino: {prop_f}%"),
+                    html.Div(f"Ignorado: {prop_i}%")
+                ]
+            else:
+                media_mensal = 0
+                texto_prop_sexo = [html.Div("Sem dados")]
+            
+            # Gráfico de tendência
+            df_tendencia = self.roll_up(dados_filtrados, ['ano', 'mes'])
+            df_tendencia['data'] = pd.to_datetime(df_tendencia['ano'].astype(str) + '-' + df_tendencia['mes'].astype(str))
+            df_tendencia = df_tendencia.sort_values('data')
+            
+            fig_tendencia = go.Figure()
+            
+            fig_tendencia.add_trace(go.Scatter(
+                x=df_tendencia['data'],
+                y=df_tendencia['total_obitos'],
+                mode='lines+markers',
+                name='Óbitos',
+                line=dict(color='firebrick', width=3),
+                marker=dict(size=8)
+            ))
+            
+            fig_tendencia.update_layout(
+                title='Tendência Temporal de Mortalidade Infantil',
+                xaxis_title='Período',
+                yaxis_title='Total de Óbitos',
+                template='plotly_white'
+            )
+            
+            # Gráfico de distribuição por UF
+            df_uf = self.roll_up(dados_filtrados, ['uf'])
+            df_uf = df_uf.sort_values('total_obitos', ascending=False)
+            
+            fig_uf = go.Figure()
+            
+            fig_uf.add_trace(go.Bar(
+                x=df_uf['uf'],
+                y=df_uf['total_obitos'],
+                marker_color='royalblue'
+            ))
+            
+            fig_uf.update_layout(
+                title='Distribuição Geográfica',
+                xaxis_title='UF',
+                yaxis_title='Total de Óbitos',
+                template='plotly_white'
+            )
+            
+            # Gráfico de causas
+            df_causas = self.roll_up(dados_filtrados, ['grupo_causa_cid'])
+            df_causas = df_causas.sort_values('total_obitos', ascending=False).head(10)
+            
+            fig_causas = go.Figure()
+            
+            fig_causas.add_trace(go.Pie(
+                labels=df_causas['grupo_causa_cid'],
+                values=df_causas['total_obitos'],
+                hole=0.4,
+                textinfo='percent+label',
+                insidetextorientation='radial'
+            ))
+            
+            fig_causas.update_layout(
+                title='Principais Causas',
+                template='plotly_white'
+            )
+            
+            # Gráfico de local de óbito
+            df_local = self.roll_up(dados_filtrados, ['local_descricao'])
+            df_local = df_local.sort_values('total_obitos', ascending=False)
+            
+            fig_local = go.Figure()
+            
+            fig_local.add_trace(go.Bar(
+                x=df_local['local_descricao'],
+                y=df_local['total_obitos'],
+                marker_color='forestgreen'
+            ))
+            
+            fig_local.update_layout(
+                title='Local de Ocorrência do Óbito',
+                xaxis_title='Local',
+                yaxis_title='Total de Óbitos',
+                template='plotly_white'
+            )
+            
+            # Dados para tabela
+            df_tabela = self.roll_up(dados_filtrados, ['ano', 'uf', 'sexo_descricao', 'local_descricao', 'grupo_causa_cid'])
+            df_tabela = df_tabela.sort_values(['ano', 'uf', 'total_obitos'], ascending=[False, True, False])
+            df_tabela = df_tabela.head(50)  # Limitar para melhorar desempenho
+            
+            return (
+                f"{total_obitos:,}".replace(',', '.'),
+                f"{media_mensal:,}".replace(',', '.'),
+                texto_prop_sexo,
+                fig_tendencia,
+                fig_uf,
+                fig_causas,
+                fig_local,
+                df_tabela.to_dict('records')
+            )
         
-        # Trace para masculino
-        fig.add_trace(
-            go.Bar(
-                x=top_estados['estado'],
-                y=top_estados['masculino'],
-                name='Masculino (Estados)',
-                marker_color='rgba(0, 0, 255, 0.7)'
-            ),
-            row=2, col=2
-        )
+        print("Dashboard criado. Execute app.run_server(debug=True) para iniciar.")
+        return app
+    
+    def extrair_insights(self):
+        """
+        Extrai insights automaticamente dos dados
+        """
+        insights = []
         
-        # Trace para feminino
-        fig.add_trace(
-            go.Bar(
-                x=top_estados['estado'],
-                y=top_estados['feminino'],
-                name='Feminino (Estados)',
-                marker_color='rgba(255, 0, 0, 0.7)'
-            ),
-            row=2, col=2
-        )
-    
-    # Layout do dashboard
-    fig.update_layout(
-        title_text="Dashboard OLAP - Análise de Óbitos Infantis (2023)",
-        width=1200,
-        height=1000,
-        showlegend=True
-    )
-    
-    # Ajustar layout dos subplots
-    fig.update_xaxes(tickangle=45, row=1, col=1)
-    fig.update_xaxes(tickangle=45, row=2, col=2)
-    
-    # Atualizar modo de barras para comparação (lado a lado)
-    fig.update_layout(barmode='group')
-    
-    fig.write_html(f"{graficos_dir}/dashboard_olap_completo.html")
-    print(f"Dashboard OLAP completo salvo em {graficos_dir}/dashboard_olap_completo.html")
+        try:
+            # Insight 1: Tendência geral
+            tendencia = self.tendencia_temporal(['ano'])
+            anos = tendencia['ano'].unique()
+            
+            if len(anos) > 1:
+                primeiro_ano = min(anos)
+                ultimo_ano = max(anos)
+                primeiro_valor = tendencia[tendencia['ano'] == primeiro_ano]['total_obitos'].values[0]
+                ultimo_valor = tendencia[tendencia['ano'] == ultimo_ano]['total_obitos'].values[0]
+                
+                variacao_pct = 100 * (ultimo_valor - primeiro_valor) / primeiro_valor if primeiro_valor > 0 else 0
+                
+                if variacao_pct < 0:
+                    insights.append(f"Houve uma redução de {abs(variacao_pct):.1f}% na mortalidade infantil entre {primeiro_ano} e {ultimo_ano}.")
+                else:
+                    insights.append(f"Houve um aumento de {variacao_pct:.1f}% na mortalidade infantil entre {primeiro_ano} e {ultimo_ano}.")
+            
+            # Insight 2: UF com maior e menor mortalidade
+            analise_uf = self.analise_geografica()
+            
+            if not analise_uf.empty:
+                uf_max = analise_uf.loc[analise_uf['total_obitos'].idxmax()]
+                uf_min = analise_uf.loc[analise_uf['total_obitos'].idxmin()]
+                
+                insights.append(f"A UF com maior número de óbitos é {uf_max['uf']} ({uf_max['total_obitos']} óbitos).")
+                insights.append(f"A UF com menor número de óbitos é {uf_min['uf']} ({uf_min['total_obitos']} óbitos).")
+            
+            # Insight 3: Principal causa
+            causas = self.analise_causas()
+            
+            if not causas.empty:
+                causa_principal = causas.iloc[0]
+                
+                insights.append(f"A principal causa de mortalidade infantil é '{causa_principal['grupo_causa_cid']}' com {causa_principal['total_obitos']} óbitos.")
+            
+            # Insight 4: Razão de sexos
+            analise_sexo = self.roll_up(self.dados, ['sexo_descricao'])
+            
+            if not analise_sexo.empty:
+                total_m = analise_sexo[analise_sexo['sexo_descricao'] == 'Masculino']['total_obitos'].sum()
+                total_f = analise_sexo[analise_sexo['sexo_descricao'] == 'Feminino']['total_obitos'].sum()
+                
+                if total_f > 0:
+                    razao = total_m / total_f
+                    insights.append(f"A razão de sexos (M/F) na mortalidade infantil é de {razao:.2f}, indicando {'maior mortalidade masculina' if razao > 1 else 'maior mortalidade feminina'}.")
+            
+            # Insight 5: Local mais comum de óbito
+            locais = self.analise_local_obito()
+            
+            if not locais.empty:
+                local_principal = locais.iloc[0]
+                
+                total_local = local_principal['total_obitos']
+                percentual = 100 * total_local / self.dados.shape[0]
+                
+                insights.append(f"{percentual:.1f}% dos óbitos ocorrem em '{local_principal['local_descricao']}'.")
+            
+            # Insight 6: Sazonalidade
+            analise_mes = self.roll_up(self.dados, ['mes'])
+            
+            if not analise_mes.empty and len(analise_mes) > 1:
+                mes_max = analise_mes.loc[analise_mes['total_obitos'].idxmax()]
+                mes_min = analise_mes.loc[analise_mes['total_obitos'].idxmin()]
+                
+                meses = {
+                    1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril',
+                    5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto',
+                    9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
+                }
+                
+                insights.append(f"O mês com maior número de óbitos é {meses.get(mes_max['mes'], mes_max['mes'])}.")
+                insights.append(f"O mês com menor número de óbitos é {meses.get(mes_min['mes'], mes_min['mes'])}.")
+        
+        except Exception as e:
+            insights.append(f"Erro ao extrair insights: {str(e)}")
+        
+        return insights
 
-# Função principal
+
+class RelatorioDinamico:
+    """
+    Classe para geração de relatórios dinâmicos a partir do cubo OLAP
+    """
+    
+    def __init__(self, cubo_olap):
+        """Inicializa com o cubo OLAP a ser analisado"""
+        self.cubo = cubo_olap
+        
+    def gerar_relatorio_geral(self, titulo="Relatório de Mortalidade Infantil"):
+        """
+        Gera um relatório geral com as principais análises
+        """
+        # Extrair insights
+        insights = self.cubo.extrair_insights()
+        
+        # Criar figuras
+        fig_tendencia = plt.figure(figsize=(10, 6))
+        ax_tendencia = fig_tendencia.add_subplot(111)
+        tendencia = self.cubo.tendencia_temporal()
+        sns.lineplot(x='ano', y='total_obitos', data=tendencia, marker='o', ax=ax_tendencia)
+        ax_tendencia.set_title('Tendência de Mortalidade Infantil')
+        ax_tendencia.set_xlabel('Ano')
+        ax_tendencia.set_ylabel('Total de Óbitos')
+        ax_tendencia.grid(True, linestyle='--', alpha=0.7)
+        
+        fig_uf = plt.figure(figsize=(12, 6))
+        ax_uf = fig_uf.add_subplot(111)
+        distribuicao_uf = self.cubo.analise_geografica()
+        distribuicao_uf = distribuicao_uf.sort_values('total_obitos', ascending=False)
+        sns.barplot(x='uf', y='total_obitos', data=distribuicao_uf, ax=ax_uf)
+        ax_uf.set_title('Distribuição Geográfica da Mortalidade Infantil')
+        ax_uf.set_xlabel('UF')
+        ax_uf.set_ylabel('Total de Óbitos')
+        ax_uf.tick_params(axis='x', rotation=90)
+        ax_uf.grid(True, axis='y', linestyle='--', alpha=0.7)
+        
+        fig_causas = plt.figure(figsize=(14, 8))
+        ax_causas = fig_causas.add_subplot(111)
+        causas = self.cubo.analise_causas()
+        causas = causas.sort_values('total_obitos', ascending=False).head(10)
+        sns.barplot(x='total_obitos', y='grupo_causa_cid', data=causas, ax=ax_causas)
+        ax_causas.set_title('Principais Causas de Mortalidade Infantil')
+        ax_causas.set_xlabel('Total de Óbitos')
+        ax_causas.set_ylabel('Grupo de Causa')
+        ax_causas.grid(True, axis='x', linestyle='--', alpha=0.7)
+        
+        fig_sexo_idade = plt.figure(figsize=(12, 8))
+        ax_sexo_idade = fig_sexo_idade.add_subplot(111)
+        sexo_idade = self.cubo.comparativo_sexo_idade()
+        pivot = sexo_idade.pivot_table(
+            values='total_obitos',
+            index='faixa_etaria',
+            columns='sexo_descricao',
+            fill_value=0
+        )
+        
+        # Ordenar faixas etárias
+        ordem_faixas = [
+            "Menos de 1 dia", 
+            "1 a 6 dias", 
+            "7 a 27 dias", 
+            "28 a 364 dias", 
+            "1 ano ou mais", 
+            "Não informado"
+        ]
+        
+        # Filtrar apenas faixas que existem nos dados
+        ordem_existente = [f for f in ordem_faixas if f in pivot.index]
+        pivot = pivot.reindex(ordem_existente)
+        
+        pivot.plot(kind='bar', ax=ax_sexo_idade)
+        ax_sexo_idade.set_title('Mortalidade por Sexo e Faixa Etária')
+        ax_sexo_idade.set_xlabel('Faixa Etária')
+        ax_sexo_idade.set_ylabel('Total de Óbitos')
+        ax_sexo_idade.legend(title='Sexo')
+        ax_sexo_idade.grid(True, axis='y', linestyle='--', alpha=0.7)
+        
+        # Fechar as figuras para liberar memória
+        plt.close(fig_tendencia)
+        plt.close(fig_uf)
+        plt.close(fig_causas)
+        plt.close(fig_sexo_idade)
+        
+        # Montar o relatório em HTML
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>{titulo}</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    margin: 20px;
+                    color: #333;
+                }}
+                h1, h2, h3 {{
+                    color: #2c3e50;
+                }}
+                .dashboard {{
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 20px;
+                    margin: 20px 0;
+                }}
+                .full-width {{
+                    grid-column: span 2;
+                }}
+                .card {{
+                    border: 1px solid #ddd;
+                    border-radius: 8px;
+                    padding: 15px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }}
+                .insight-list {{
+                    background-color: #f9f9f9;
+                    padding: 15px;
+                    border-radius: 8px;
+                    margin-bottom: 20px;
+                }}
+                .insight-item {{
+                    margin-bottom: 10px;
+                    padding-left: 20px;
+                    position: relative;
+                }}
+                .insight-item:before {{
+                    content: "→";
+                    position: absolute;
+                    left: 0;
+                    color: #3498db;
+                }}
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 20px 0;
+                }}
+                th, td {{
+                    padding: 12px;
+                    text-align: left;
+                    border-bottom: 1px solid #ddd;
+                }}
+                th {{
+                    background-color: #2c3e50;
+                    color: white;
+                }}
+                tr:nth-child(even) {{
+                    background-color: #f2f2f2;
+                }}
+                .chart-container {{
+                    width: 100%;
+                    height: 400px;
+                    margin: 20px 0;
+                }}
+                .footer {{
+                    margin-top: 30px;
+                    padding-top: 10px;
+                    border-top: 1px solid #ddd;
+                    font-size: 0.8em;
+                    color: #666;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>{titulo}</h1>
+            <p>Data de geração: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
+            
+            <div class="insight-list">
+                <h2>Principais Insights</h2>
+                {"".join([f'<div class="insight-item">{insight}</div>' for insight in insights])}
+            </div>
+            
+            <div class="dashboard">
+                <div class="card">
+                    <h2>Tendência Temporal</h2>
+                    <div class="chart-container" id="chart-tendencia"></div>
+                </div>
+                
+                <div class="card">
+                    <h2>Distribuição Geográfica</h2>
+                    <div class="chart-container" id="chart-uf"></div>
+                </div>
+                
+                <div class="card full-width">
+                    <h2>Principais Causas</h2>
+                    <div class="chart-container" id="chart-causas"></div>
+                </div>
+                
+                <div class="card full-width">
+                    <h2>Mortalidade por Sexo e Faixa Etária</h2>
+                    <div class="chart-container" id="chart-sexo-idade"></div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>Tabela Resumo por UF</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>UF</th>
+                            <th>Total de Óbitos</th>
+                            <th>% do Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        
+        # Adicionar linhas da tabela
+        distribuicao_uf = self.cubo.analise_geografica()
+        distribuicao_uf = distribuicao_uf.sort_values('total_obitos', ascending=False)
+        total_geral = distribuicao_uf['total_obitos'].sum()
+        
+        for _, row in distribuicao_uf.iterrows():
+            percentual = 100 * row['total_obitos'] / total_geral if total_geral > 0 else 0
+            html += f"""
+                        <tr>
+                            <td>{row['uf']}</td>
+                            <td>{row['total_obitos']:,}</td>
+                            <td>{percentual:.1f}%</td>
+                        </tr>
+            """
+        
+        html += f"""
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="footer">
+                <p>Este relatório foi gerado automaticamente com base nos dados do DATASUS.</p>
+                <p>Período analisado: {min(self.cubo.dados['ano']) if not self.cubo.dados.empty else 'N/A'} a {max(self.cubo.dados['ano']) if not self.cubo.dados.empty else 'N/A'}</p>
+            </div>
+            
+            <!-- Incluir biblioteca Plotly para os gráficos -->
+            <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+            <script>
+                // Código JavaScript para criar os gráficos com Plotly iria aqui
+                // Na implementação real, você exportaria os gráficos do Python para JSON
+                // e usaria esse JSON para renderizar os gráficos no navegador
+            </script>
+        </body>
+        </html>
+        """
+        
+        return html
+    
+    def exportar_relatorio(self, caminho_arquivo="relatorio_mortalidade_infantil.html"):
+        """
+        Exporta o relatório para um arquivo HTML
+        """
+        html = self.gerar_relatorio_geral()
+        
+        with open(caminho_arquivo, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        print(f"Relatório exportado para {caminho_arquivo}")
+
+
 def main():
-    print("Iniciando geração de gráficos OLAP para análise de óbitos infantis...")
+    """
+    Função principal para demonstrar o uso do sistema OLAP
+    """
+    print("Inicializando sistema OLAP para análise de mortalidade infantil...")
     
-    # Carregar dados
-    dados = carregar_dados()
-    
-    # Verificar quais tabelas foram carregadas
-    print("\nTabelas disponíveis para análise:")
-    for tabela, df in dados.items():
-        if df is not None:
-            print(f"- {tabela}: {len(df)} registros")
-    
-    # Criar gráficos OLAP
-    criar_grafico_olap_sexo_local(dados)
-    criar_grafico_olap_investigacao(dados)
-    criar_grafico_olap_gestacao(dados)
-    criar_dashboard_olap(dados)
-    
-    print("\nGeração de gráficos OLAP concluída. Todos os arquivos foram salvos no diretório:", graficos_dir)
-    print("Para visualizar os gráficos interativos, abra os arquivos HTML em um navegador.")
+    try:
+        # Criar o cubo OLAP
+        cubo = CuboOLAP()
+        
+        if cubo.dados.empty:
+            print("Não foi possível carregar os dados. Verifique se o banco de dados existe.")
+            return
+        
+        print("\n=== SISTEMA OLAP DE ANÁLISE DE MORTALIDADE INFANTIL ===")
+        print(f"Total de registros carregados: {len(cubo.dados)}")
+        print(f"Período disponível: {cubo.dados['ano'].min()} a {cubo.dados['ano'].max()}")
+        print(f"UFs disponíveis: {sorted(cubo.dados['uf'].unique())}")
+        
+        # Demonstrar algumas operações OLAP
+        print("\n1. TENDÊNCIA TEMPORAL DOS ÓBITOS")
+        tendencia = cubo.tendencia_temporal()
+        print(tendencia)
+        
+        print("\n2. DISTRIBUIÇÃO GEOGRÁFICA")
+        geografia = cubo.analise_geografica()
+        print(geografia.sort_values('total_obitos', ascending=False).head(10))
+        
+        print("\n3. PRINCIPAIS CAUSAS")
+        causas = cubo.analise_causas()
+        print(causas.head(10))
+        
+        print("\n4. ANÁLISE POR SEXO E FAIXA ETÁRIA")
+        sexo_idade = cubo.comparativo_sexo_idade()
+        print(sexo_idade)
+        
+        print("\n5. ANÁLISE POR LOCAL DE ÓBITO")
+        local = cubo.analise_local_obito()
+        print(local)
+        
+        # Exemplo de operação SLICE
+        print("\n6. OPERAÇÃO SLICE - Óbitos em Hospital")
+        slice_hospital = cubo.slice('local_descricao', 'Hospital')
+        resumo_slice = cubo.roll_up(slice_hospital, ['ano'])
+        print(resumo_slice)
+
+        
+        # Exemplo de operação DRILL-DOWN
+        print("\n7. OPERAÇÃO DRILL-DOWN - De UF para Causa")
+        drill_down = cubo.drill_down(cubo.dados, 'uf', 'grupo_causa_cid', 'SP')
+        print(drill_down.head(10))
+
+        
+        # Gerar insights
+        print("\n8. INSIGHTS AUTOMÁTICOS")
+        insights = cubo.extrair_insights()
+        for i, insight in enumerate(insights, 1):
+            print(f"{i}. {insight}")
+        
+        # Gerar relatório
+        print("\n10. RELATÓRIO DINÂMICO")
+        relatorio = RelatorioDinamico(cubo)
+        relatorio.exportar_relatorio()
+        
+        print("\nAnálise concluída com sucesso!")
+        
+        return cubo, app
+        
+    except Exception as e:
+        print(f"Erro durante a análise: {str(e)}")
+
 
 if __name__ == "__main__":
     main()
-    conn.close()
