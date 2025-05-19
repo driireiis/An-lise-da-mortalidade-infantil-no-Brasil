@@ -1,0 +1,67 @@
+import pandas as pd
+from pysus import SIM
+import sqlalchemy as sa
+from datetime import datetime
+
+DATABASE_URI = "sqlite:///mortalidade_infantil.db"
+UFS = ["AC", "AL", "AM", "AP", "BA", "CE", "DF", "ES", "GO", "MA", "MG", "MS", "MT",
+       "PA", "PB", "PE", "PI", "PR", "RJ", "RN", "RO", "RR", "RS", "SC", "SE", "SP", "TO"]
+
+def calcular_anos_recentes(n=3):
+    ano_atual = datetime.now().year
+    return list(range(ano_atual - n - 1, ano_atual - 1))
+
+def inserir_dados(anos, ufs):
+    engine = sa.create_engine(DATABASE_URI)
+    sim = SIM().load()
+
+    for ano in anos:
+        for uf in ufs:
+            print(f"Processando dados de {uf} para {ano}...")
+            try:
+                files = sim.get_files("CID10", uf=uf, year=ano)
+                if not files:
+                    continue
+                for file in files:
+                    parquet_file = file.download()
+                    df = parquet_file.to_dataframe()
+
+                    colunas_necessarias = ['DTOBITO', 'SEXO', 'IDADE', 'LOCOCOR', 'CAUSABAS', 'CODMUNOCOR']
+                    if not all(col in df.columns for col in colunas_necessarias):
+                        continue
+
+                    tem_dtnasc = 'DTNASC' in df.columns
+                    df['IDADE'] = pd.to_numeric(df['IDADE'], errors='coerce')
+
+                    condicoes = [df['IDADE'] == 0]
+                    if tem_dtnasc:
+                        df['DTNASC'] = pd.to_datetime(df['DTNASC'], format='%d%m%Y', errors='coerce')
+                        df['DTOBITO'] = pd.to_datetime(df['DTOBITO'], format='%d%m%Y', errors='coerce')
+                        df['dias_vida'] = (df['DTOBITO'] - df['DTNASC']).dt.days
+                        condicoes.append((df['dias_vida'] >= 0) & (df['dias_vida'] < 365))
+
+                    df_infantil = df[pd.concat(condicoes, axis=1).any(axis=1)]
+                    if df_infantil.empty:
+                        continue
+
+                    mapeamento_colunas = {
+                        'DTOBITO': 'data_obito',
+                        'SEXO': 'sexo',
+                        'IDADE': 'idade',
+                        'LOCOCOR': 'local_obito',
+                        'CAUSABAS': 'causa_basica',
+                        'CODMUNOCOR': 'municipio'
+                    }
+
+                    df_processado = df_infantil[mapeamento_colunas.keys()].rename(columns=mapeamento_colunas)
+                    df_processado['ano'] = ano
+                    df_processado['uf'] = uf
+                    df_processado.to_sql('mortalidade_infantil', engine, if_exists='append', index=False)
+
+                    print(f"{len(df_processado)} registros inseridos.")
+            except Exception as e:
+                print(f"Erro ao processar {uf}/{ano}: {e}")
+
+if __name__ == "__main__":
+    anos = calcular_anos_recentes(n=3)
+    inserir_dados(anos, UFS)
