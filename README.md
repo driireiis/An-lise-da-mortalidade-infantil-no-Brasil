@@ -123,7 +123,7 @@ Integração com outras fontes de dados do DATASUS para enriquecer a análise.
 
 Automatização da atualização dos dados.
 
-Melhoria da interface do dashboard com novos filtros e visualizações.'''
+Melhoria da interface do dashboard com novos filtros e visualizações.
 
 Integrantes do Grupo
 Adriana Gomes dos Reis
