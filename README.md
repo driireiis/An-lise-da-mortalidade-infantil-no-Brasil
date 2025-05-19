@@ -12,7 +12,7 @@ O projeto foi desenvolvido em Python 3 e utiliza as seguintes bibliotecas:
 - pandas  
 - numpy  
 - sqlalchemy (para conexão com bancos de dados)  
-- Pysus (para acesso aos dados do DATASUS)  
+- Google Colab 
 
 ### Visualização de dados:
 - matplotlib.pyplot  
@@ -113,12 +113,12 @@ Copiar
 Editar
 python dash_app.py
 Acesse no navegador o endereço informado no terminal (geralmente http://127.0.0.1:8050).
-
-Possíveis Expansões
-Inclusão de outras dimensões, como causas de morte e faixa etária detalhada.
 ```
+### Possíveis Expansões
+Inclusão de outras dimensões, como causas de morte e faixa etária detalhada.
 
-Análises temporais e comparações históricas.
+
+### Análises temporais e comparações históricas.
 
 Integração com outras fontes de dados do DATASUS para enriquecer a análise.
 
@@ -126,14 +126,14 @@ Automatização da atualização dos dados.
 
 Melhoria da interface do dashboard com novos filtros e visualizações.
 
-Integrantes do Grupo
+### Integrantes do Grupo
 Adriana Gomes dos Reis
 
 Gabriel Aleixo
 
 Danilo Menegaldo
 
-Observações Finais
+### Observações Finais
 A estrutura do projeto prioriza facilidade de manutenção, reutilização do código e visualização clara dos dados.
 
 O uso de SQLite e SQLAlchemy garante portabilidade e flexibilidade para manipulação dos dados.
