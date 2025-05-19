@@ -1,0 +1,55 @@
+import sqlalchemy as sa
+
+DATABASE_URI = "sqlite:///mortalidade_infantil.db"
+
+def criar_tabelas():
+    engine = sa.create_engine(DATABASE_URI)
+    metadata = sa.MetaData()
+
+    mortalidade_infantil = sa.Table(
+        'mortalidade_infantil', metadata,
+        sa.Column('id', sa.Integer, primary_key=True),
+        sa.Column('ano', sa.Integer),
+        sa.Column('uf', sa.String(2)),
+        sa.Column('municipio', sa.String(100)),
+        sa.Column('data_obito', sa.String(20)),
+        sa.Column('sexo', sa.String(1)),
+        sa.Column('idade', sa.Float),
+        sa.Column('local_obito', sa.String(1)),
+        sa.Column('causa_basica', sa.String(4)),
+        sa.Column('grupo_causa', sa.String(100)),
+    )
+
+    dim_municipios = sa.Table(
+        'dim_municipios', metadata,
+        sa.Column('codigo', sa.String(6), primary_key=True),
+        sa.Column('nome', sa.String(100), nullable=False),
+        sa.Column('uf', sa.String(2), nullable=False),
+    )
+
+    dim_locais_obito = sa.Table(
+        'dim_locais_obito', metadata,
+        sa.Column('codigo', sa.String(1), primary_key=True),
+        sa.Column('descricao', sa.String(50), nullable=False),
+    )
+
+    metadata.create_all(engine)
+
+    # Inserir dados em tabela de dimensão
+    conn = engine.connect()
+    locais_obito = [
+        {"codigo": "1", "descricao": "Hospital"},
+        {"codigo": "2", "descricao": "Outros estabelecimentos de saúde"},
+        {"codigo": "3", "descricao": "Domicílio"},
+        {"codigo": "4", "descricao": "Via pública"},
+        {"codigo": "5", "descricao": "Outros"},
+        {"codigo": "9", "descricao": "Ignorado"}
+    ]
+    for local in locais_obito:
+        conn.execute(dim_locais_obito.insert().prefix_with("OR REPLACE"), local)
+
+    conn.close()
+    print("Tabelas criadas com sucesso.")
+
+if __name__ == "__main__":
+    criar_tabelas()
